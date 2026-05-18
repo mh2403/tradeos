@@ -1,0 +1,155 @@
+:root {
+  font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  color: #e6edf3;
+  background: #070b11;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at 20% 0%, #103d3f 0%, transparent 40%),
+    radial-gradient(circle at 80% 0%, #1b3a5d 0%, transparent 35%),
+    #070b11;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+.shell {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 1.5rem;
+}
+
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 1.25rem;
+}
+
+h1,
+h2,
+p {
+  margin: 0;
+}
+
+.topbar p {
+  color: #8da3b7;
+  margin-top: 0.35rem;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 1rem;
+}
+
+.card {
+  background: rgba(12, 17, 27, 0.85);
+  border: 1px solid #1f2b3c;
+  border-radius: 14px;
+  padding: 1rem;
+  backdrop-filter: blur(6px);
+}
+
+.auth-card {
+  max-width: 460px;
+  margin: 6rem auto 0;
+}
+
+.auth-card p {
+  color: #8da3b7;
+  margin: 0.75rem 0 1rem;
+}
+
+.stack {
+  display: grid;
+  gap: 0.75rem;
+}
+
+input,
+textarea {
+  width: 100%;
+  border: 1px solid #2a3a50;
+  border-radius: 10px;
+  padding: 0.7rem 0.8rem;
+  color: #e6edf3;
+  background: #0d1421;
+}
+
+textarea {
+  resize: vertical;
+}
+
+button {
+  border: 0;
+  border-radius: 10px;
+  padding: 0.68rem 1rem;
+  color: #051116;
+  background: #2ed3b7;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
+.entries {
+  list-style: none;
+  margin: 0.9rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 0.75rem;
+}
+
+.entries li {
+  border: 1px solid #243246;
+  background: #0c1320;
+  border-radius: 10px;
+  padding: 0.7rem;
+}
+
+.entries time {
+  display: block;
+  font-size: 0.8rem;
+  color: #8da3b7;
+  margin-bottom: 0.35rem;
+}
+
+.entries p {
+  white-space: pre-wrap;
+  line-height: 1.4;
+}
+
+.ok {
+  color: #4de2c9;
+  margin-top: 0.8rem;
+}
+
+.err {
+  color: #ff7e7e;
+  margin-top: 0.8rem;
+}
+
+.global-err {
+  margin-top: 1rem;
+}
+
+@media (max-width: 680px) {
+  .topbar {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}
