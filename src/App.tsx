@@ -41,6 +41,13 @@ type Trade = {
   r_multiple: number | null
   confidence: number | null
   plan_followed: boolean
+  entry_comment: string | null
+  management_comment: string | null
+  exit_comment: string | null
+  entry_rating: -1 | 0 | 1
+  management_rating: -1 | 0 | 1
+  exit_rating: -1 | 0 | 1
+  custom_stats: Record<string, string>
   note: string | null
   account_id: string | null
   setup_id: string | null
@@ -74,6 +81,14 @@ type TradeForm = {
   netPnl: string
   confidence: string
   planFollowed: boolean
+  entryComment: string
+  managementComment: string
+  exitComment: string
+  entryRating: '-1' | '0' | '1'
+  managementRating: '-1' | '0' | '1'
+  exitRating: '-1' | '0' | '1'
+  marketCondition: string
+  emotion: string
   note: string
   tagsCsv: string
 }
@@ -97,6 +112,14 @@ const createDefaultTradeForm = (accountId = '', setupId = ''): TradeForm => ({
   netPnl: '',
   confidence: '',
   planFollowed: true,
+  entryComment: '',
+  managementComment: '',
+  exitComment: '',
+  entryRating: '0',
+  managementRating: '0',
+  exitRating: '0',
+  marketCondition: '',
+  emotion: '',
   note: '',
   tagsCsv: '',
 })
@@ -117,6 +140,44 @@ const formatCurrency = (value: number) =>
 const formatPercent = (value: number) => `${value.toFixed(2)}%`
 
 const dayKeyFromIso = (iso: string) => iso.slice(0, 10)
+
+const getRequiredRForPositiveExpectancy = (winratePercent: number) => {
+  const w = winratePercent / 100
+  if (w <= 0) return Number.POSITIVE_INFINITY
+  if (w >= 1) return 0
+  return (1 - w) / w
+}
+
+const getPlannedR = (trade: Trade) => {
+  if (
+    trade.entry_price === null ||
+    trade.stop_loss === null ||
+    trade.take_profit === null ||
+    trade.entry_price === trade.stop_loss
+  ) {
+    return null
+  }
+
+  const risk =
+    trade.side === 'long'
+      ? trade.entry_price - trade.stop_loss
+      : trade.stop_loss - trade.entry_price
+  const reward =
+    trade.side === 'long'
+      ? trade.take_profit - trade.entry_price
+      : trade.entry_price - trade.take_profit
+
+  if (risk <= 0) return null
+  return reward / risk
+}
+
+const getRealizedR = (trade: Trade) => trade.r_multiple
+
+const getTiltScore = (trade: Trade) => {
+  const ratings: number[] = [trade.entry_rating, trade.management_rating, trade.exit_rating]
+  const avg = ratings.reduce((sum, r) => sum + r, 0) / ratings.length
+  return Math.round(((avg + 1) / 2) * 100)
+}
 
 const normalizeTrade = (row: RawTrade): Trade => {
   const accountRel = Array.isArray(row.trading_accounts)
@@ -150,6 +211,25 @@ const normalizeTrade = (row: RawTrade): Trade => {
     r_multiple: row.r_multiple === null ? null : Number(row.r_multiple),
     confidence: row.confidence === null ? null : Number(row.confidence),
     plan_followed: row.plan_followed === null ? true : Boolean(row.plan_followed),
+    entry_comment: row.entry_comment ? String(row.entry_comment) : null,
+    management_comment: row.management_comment ? String(row.management_comment) : null,
+    exit_comment: row.exit_comment ? String(row.exit_comment) : null,
+    entry_rating:
+      Number(row.entry_rating) === -1 || Number(row.entry_rating) === 1
+        ? (Number(row.entry_rating) as -1 | 1)
+        : 0,
+    management_rating:
+      Number(row.management_rating) === -1 || Number(row.management_rating) === 1
+        ? (Number(row.management_rating) as -1 | 1)
+        : 0,
+    exit_rating:
+      Number(row.exit_rating) === -1 || Number(row.exit_rating) === 1
+        ? (Number(row.exit_rating) as -1 | 1)
+        : 0,
+    custom_stats:
+      row.custom_stats && typeof row.custom_stats === 'object'
+        ? (row.custom_stats as Record<string, string>)
+        : {},
     note: row.note ? String(row.note) : null,
     account_id: row.account_id ? String(row.account_id) : null,
     setup_id: row.setup_id ? String(row.setup_id) : null,
@@ -182,6 +262,11 @@ function App() {
   const [symbolFilter, setSymbolFilter] = useState('')
   const [setupFilter, setSetupFilter] = useState('all')
   const [sessionFilter, setSessionFilter] = useState('all')
+  const [tagFilter, setTagFilter] = useState('all')
+  const [planFilter, setPlanFilter] = useState<'all' | 'followed' | 'broken'>('all')
+  const [minConfidenceFilter, setMinConfidenceFilter] = useState('')
+  const [emotionFilter, setEmotionFilter] = useState('all')
+  const [marketConditionFilter, setMarketConditionFilter] = useState('all')
 
   const [newAccountName, setNewAccountName] = useState('')
   const [newSetupName, setNewSetupName] = useState('')
@@ -229,7 +314,7 @@ function App() {
           client
             .from('trades')
             .select(
-              'id, symbol, side, session, status, opened_at, closed_at, entry_price, exit_price, stop_loss, take_profit, risk_amount, position_size, fees, swap, net_pnl, r_multiple, confidence, plan_followed, note, account_id, setup_id, trading_accounts(name, account_currency), setups(name)',
+              'id, symbol, side, session, status, opened_at, closed_at, entry_price, exit_price, stop_loss, take_profit, risk_amount, position_size, fees, swap, net_pnl, r_multiple, confidence, plan_followed, entry_comment, management_comment, exit_comment, entry_rating, management_rating, exit_rating, custom_stats, note, account_id, setup_id, trading_accounts(name, account_currency), setups(name)',
             )
             .order('opened_at', { ascending: false }),
           client.from('trade_tags').select('trade_id, tags(name, color)'),
@@ -324,14 +409,66 @@ function App() {
     loadWorkspace()
   }, [session])
 
+  const emotionOptions = useMemo(() => {
+    const values = new Set<string>()
+    trades.forEach((trade) => {
+      const v = trade.custom_stats.emotion?.trim()
+      if (v) values.add(v)
+    })
+    return Array.from(values).sort((a, b) => a.localeCompare(b))
+  }, [trades])
+
+  const marketConditionOptions = useMemo(() => {
+    const values = new Set<string>()
+    trades.forEach((trade) => {
+      const v = trade.custom_stats.market_condition?.trim()
+      if (v) values.add(v)
+    })
+    return Array.from(values).sort((a, b) => a.localeCompare(b))
+  }, [trades])
+
   const filteredTrades = useMemo(() => {
     return trades.filter((trade) => {
       const symbolOk = !symbolFilter || trade.symbol.toLowerCase().includes(symbolFilter.toLowerCase())
       const setupOk = setupFilter === 'all' || trade.setup_id === setupFilter
       const sessionOk = sessionFilter === 'all' || trade.session === sessionFilter
-      return symbolOk && setupOk && sessionOk
+      const tagOk = tagFilter === 'all' || (tradeTags[trade.id] ?? []).includes(tagFilter)
+      const planOk =
+        planFilter === 'all' ||
+        (planFilter === 'followed' && trade.plan_followed) ||
+        (planFilter === 'broken' && !trade.plan_followed)
+      const confidenceMin = minConfidenceFilter ? Number(minConfidenceFilter) : null
+      const confidenceOk =
+        confidenceMin === null || (trade.confidence !== null && trade.confidence >= confidenceMin)
+      const emotionOk =
+        emotionFilter === 'all' || (trade.custom_stats.emotion ?? '') === emotionFilter
+      const marketConditionOk =
+        marketConditionFilter === 'all' ||
+        (trade.custom_stats.market_condition ?? '') === marketConditionFilter
+
+      return (
+        symbolOk &&
+        setupOk &&
+        sessionOk &&
+        tagOk &&
+        planOk &&
+        confidenceOk &&
+        emotionOk &&
+        marketConditionOk
+      )
     })
-  }, [trades, symbolFilter, setupFilter, sessionFilter])
+  }, [
+    trades,
+    symbolFilter,
+    setupFilter,
+    sessionFilter,
+    tagFilter,
+    planFilter,
+    minConfidenceFilter,
+    emotionFilter,
+    marketConditionFilter,
+    tradeTags,
+  ])
 
   const tradeMetrics = useMemo(() => {
     const closedTrades = filteredTrades.filter((trade) => trade.status !== 'open')
@@ -341,6 +478,7 @@ function App() {
     const losses = closedTrades.filter((trade) => trade.net_pnl < 0)
     const winrate = totalTrades > 0 ? (wins.length / totalTrades) * 100 : 0
     const avgPnl = totalTrades > 0 ? netReturn / totalTrades : 0
+    const expectancy = avgPnl
 
     const grossProfit = wins.reduce((sum, trade) => sum + trade.net_pnl, 0)
     const grossLossAbs = Math.abs(losses.reduce((sum, trade) => sum + trade.net_pnl, 0))
@@ -381,6 +519,7 @@ function App() {
       netReturn,
       winrate,
       avgPnl,
+      expectancy,
       profitFactor,
       avgR,
       totalFees,
@@ -531,6 +670,16 @@ function App() {
       r_multiple: rMultiple,
       confidence: asNumberOrNull(form.confidence),
       plan_followed: form.planFollowed,
+      entry_comment: form.entryComment.trim() || null,
+      management_comment: form.managementComment.trim() || null,
+      exit_comment: form.exitComment.trim() || null,
+      entry_rating: Number(form.entryRating),
+      management_rating: Number(form.managementRating),
+      exit_rating: Number(form.exitRating),
+      custom_stats: {
+        market_condition: form.marketCondition.trim(),
+        emotion: form.emotion.trim(),
+      },
       note: form.note.trim() || null,
     }
 
@@ -538,7 +687,7 @@ function App() {
       .from('trades')
       .insert(payload)
       .select(
-        'id, symbol, side, session, status, opened_at, closed_at, entry_price, exit_price, stop_loss, take_profit, risk_amount, position_size, fees, swap, net_pnl, r_multiple, confidence, plan_followed, note, account_id, setup_id, trading_accounts(name, account_currency), setups(name)',
+        'id, symbol, side, session, status, opened_at, closed_at, entry_price, exit_price, stop_loss, take_profit, risk_amount, position_size, fees, swap, net_pnl, r_multiple, confidence, plan_followed, entry_comment, management_comment, exit_comment, entry_rating, management_rating, exit_rating, custom_stats, note, account_id, setup_id, trading_accounts(name, account_currency), setups(name)',
       )
       .single()
 
@@ -630,6 +779,8 @@ function App() {
   }
 
   const monthTitle = selectedMonth.toLocaleDateString('en-US', { month: 'long', year: 'numeric' })
+  const requiredR = getRequiredRForPositiveExpectancy(tradeMetrics.winrate)
+  const pcpActive = tradeMetrics.totalTrades >= 30 && Number.isFinite(requiredR)
 
   return (
     <main className="dashboard-shell">
@@ -653,27 +804,71 @@ function App() {
             <h1>Performance Dashboard</h1>
             <p>Edgewonk-style evaluatie op je eigen trading data.</p>
           </div>
-          <div className="toolbar-right">
-            <input
-              value={symbolFilter}
-              onChange={(e) => setSymbolFilter(e.target.value)}
-              placeholder="Filter symbol (EURUSD, XAUUSD...)"
-            />
-            <select value={setupFilter} onChange={(e) => setSetupFilter(e.target.value)}>
-              <option value="all">Alle setups</option>
-              {setups.map((setup) => (
-                <option key={setup.id} value={setup.id}>
-                  {setup.name}
-                </option>
-              ))}
-            </select>
-            <select value={sessionFilter} onChange={(e) => setSessionFilter(e.target.value)}>
-              <option value="all">Alle sessies</option>
-              <option value="asia">Asia</option>
-              <option value="london">London</option>
-              <option value="newyork">New York</option>
-              <option value="other">Other</option>
-            </select>
+          <div className="toolbar-right filters-stack">
+            <div className="filters-grid basic-filters">
+              <input
+                value={symbolFilter}
+                onChange={(e) => setSymbolFilter(e.target.value)}
+                placeholder="Filter symbol (EURUSD, XAUUSD...)"
+              />
+              <select value={setupFilter} onChange={(e) => setSetupFilter(e.target.value)}>
+                <option value="all">Alle setups</option>
+                {setups.map((setup) => (
+                  <option key={setup.id} value={setup.id}>
+                    {setup.name}
+                  </option>
+                ))}
+              </select>
+              <select value={sessionFilter} onChange={(e) => setSessionFilter(e.target.value)}>
+                <option value="all">Alle sessies</option>
+                <option value="asia">Asia</option>
+                <option value="london">London</option>
+                <option value="newyork">New York</option>
+                <option value="other">Other</option>
+              </select>
+            </div>
+            <div className="filters-grid advanced-filters">
+              <select value={tagFilter} onChange={(e) => setTagFilter(e.target.value)}>
+                <option value="all">Alle tags</option>
+                {tags.map((tag) => (
+                  <option key={tag.id} value={tag.name}>
+                    {tag.name}
+                  </option>
+                ))}
+              </select>
+              <select
+                value={planFilter}
+                onChange={(e) => setPlanFilter(e.target.value as 'all' | 'followed' | 'broken')}
+              >
+                <option value="all">Plan all</option>
+                <option value="followed">Plan gevolgd</option>
+                <option value="broken">Plan gebroken</option>
+              </select>
+              <input
+                value={minConfidenceFilter}
+                onChange={(e) => setMinConfidenceFilter(e.target.value)}
+                placeholder="Min confidence"
+              />
+              <select value={emotionFilter} onChange={(e) => setEmotionFilter(e.target.value)}>
+                <option value="all">Emotion all</option>
+                {emotionOptions.map((value) => (
+                  <option key={value} value={value}>
+                    {value}
+                  </option>
+                ))}
+              </select>
+              <select
+                value={marketConditionFilter}
+                onChange={(e) => setMarketConditionFilter(e.target.value)}
+              >
+                <option value="all">Market all</option>
+                {marketConditionOptions.map((value) => (
+                  <option key={value} value={value}>
+                    {value}
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
         </header>
 
@@ -687,8 +882,8 @@ function App() {
             <h3>{formatPercent(tradeMetrics.winrate)}</h3>
           </article>
           <article className="kpi card">
-            <p>Avg P&L</p>
-            <h3>{formatCurrency(tradeMetrics.avgPnl)}</h3>
+            <p>Expectancy</p>
+            <h3>{formatCurrency(tradeMetrics.expectancy)}</h3>
           </article>
           <article className="kpi card">
             <p>Profit Factor</p>
@@ -867,6 +1062,74 @@ function App() {
                 placeholder="Tags (comma separated): A+, news, overtrade"
               />
 
+              <div className="two-col">
+                <input
+                  value={form.marketCondition}
+                  onChange={(e) => setForm((prev) => ({ ...prev, marketCondition: e.target.value }))}
+                  placeholder="Custom stat: market_condition"
+                />
+                <input
+                  value={form.emotion}
+                  onChange={(e) => setForm((prev) => ({ ...prev, emotion: e.target.value }))}
+                  placeholder="Custom stat: emotion"
+                />
+              </div>
+
+              <div className="three-col">
+                <select
+                  value={form.entryRating}
+                  onChange={(e) =>
+                    setForm((prev) => ({ ...prev, entryRating: e.target.value as '-1' | '0' | '1' }))
+                  }
+                >
+                  <option value="-1">Entry rating: negative</option>
+                  <option value="0">Entry rating: neutral</option>
+                  <option value="1">Entry rating: positive</option>
+                </select>
+                <select
+                  value={form.managementRating}
+                  onChange={(e) =>
+                    setForm((prev) => ({
+                      ...prev,
+                      managementRating: e.target.value as '-1' | '0' | '1',
+                    }))
+                  }
+                >
+                  <option value="-1">Mgmt rating: negative</option>
+                  <option value="0">Mgmt rating: neutral</option>
+                  <option value="1">Mgmt rating: positive</option>
+                </select>
+                <select
+                  value={form.exitRating}
+                  onChange={(e) =>
+                    setForm((prev) => ({ ...prev, exitRating: e.target.value as '-1' | '0' | '1' }))
+                  }
+                >
+                  <option value="-1">Exit rating: negative</option>
+                  <option value="0">Exit rating: neutral</option>
+                  <option value="1">Exit rating: positive</option>
+                </select>
+              </div>
+
+              <textarea
+                value={form.entryComment}
+                onChange={(e) => setForm((prev) => ({ ...prev, entryComment: e.target.value }))}
+                rows={2}
+                placeholder="Entry comment"
+              />
+              <textarea
+                value={form.managementComment}
+                onChange={(e) => setForm((prev) => ({ ...prev, managementComment: e.target.value }))}
+                rows={2}
+                placeholder="Management comment"
+              />
+              <textarea
+                value={form.exitComment}
+                onChange={(e) => setForm((prev) => ({ ...prev, exitComment: e.target.value }))}
+                rows={2}
+                placeholder="Exit comment"
+              />
+
               <textarea
                 value={form.note}
                 onChange={(e) => setForm((prev) => ({ ...prev, note: e.target.value }))}
@@ -978,6 +1241,10 @@ function App() {
                   {tradeMetrics.winningDays} / {tradeMetrics.losingDays}
                 </strong>
               </li>
+              <li>
+                <span>PCP/PCR Threshold</span>
+                <strong>{pcpActive ? `${requiredR.toFixed(2)}R` : 'Need 30 trades'}</strong>
+              </li>
             </ul>
           </article>
         </section>
@@ -995,24 +1262,56 @@ function App() {
                   <th>Session</th>
                   <th>P&L</th>
                   <th>R</th>
+                  <th>PCP</th>
+                  <th>PCR</th>
+                  <th>Tilt</th>
                   <th>Tags</th>
                   <th>Plan</th>
                 </tr>
               </thead>
               <tbody>
-                {filteredTrades.map((trade) => (
-                  <tr key={trade.id}>
-                    <td>{new Date(trade.opened_at).toLocaleString()}</td>
-                    <td>{trade.symbol}</td>
-                    <td>{trade.side.toUpperCase()}</td>
-                    <td>{trade.setups?.name ?? '-'}</td>
-                    <td>{trade.session}</td>
-                    <td className={trade.net_pnl >= 0 ? 'pos' : 'neg'}>{formatCurrency(trade.net_pnl)}</td>
-                    <td>{trade.r_multiple !== null ? `${trade.r_multiple.toFixed(2)}R` : '-'}</td>
-                    <td>{(tradeTags[trade.id] ?? []).join(', ') || '-'}</td>
-                    <td>{trade.plan_followed ? 'Yes' : 'No'}</td>
-                  </tr>
-                ))}
+                {filteredTrades.map((trade) => {
+                  const plannedR = getPlannedR(trade)
+                  const realizedR = getRealizedR(trade)
+                  const tiltScore = getTiltScore(trade)
+                  const pcpState =
+                    !pcpActive || plannedR === null
+                      ? 'na'
+                      : plannedR > requiredR
+                        ? 'green'
+                        : 'red'
+                  const pcrState =
+                    !pcpActive || realizedR === null
+                      ? 'na'
+                      : realizedR > requiredR
+                        ? 'green'
+                        : 'red'
+
+                  return (
+                    <tr key={trade.id}>
+                      <td>{new Date(trade.opened_at).toLocaleString()}</td>
+                      <td>{trade.symbol}</td>
+                      <td>{trade.side.toUpperCase()}</td>
+                      <td>{trade.setups?.name ?? '-'}</td>
+                      <td>{trade.session}</td>
+                      <td className={trade.net_pnl >= 0 ? 'pos' : 'neg'}>{formatCurrency(trade.net_pnl)}</td>
+                      <td>{trade.r_multiple !== null ? `${trade.r_multiple.toFixed(2)}R` : '-'}</td>
+                      <td>
+                        <span className={`traffic ${pcpState}`}>{pcpState === 'na' ? '·' : ''}</span>
+                      </td>
+                      <td>
+                        <span className={`traffic ${pcrState}`}>{pcrState === 'na' ? '·' : ''}</span>
+                      </td>
+                      <td>
+                        <div className="tilt-wrap">
+                          <div className="tilt-bar" style={{ width: `${tiltScore}%` }} />
+                        </div>
+                      </td>
+                      <td>{(tradeTags[trade.id] ?? []).join(', ') || '-'}</td>
+                      <td>{trade.plan_followed ? 'Yes' : 'No'}</td>
+                    </tr>
+                  )
+                })}
               </tbody>
             </table>
           </div>
