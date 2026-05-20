@@ -1,6 +1,6 @@
-# TradeOS
+# MH Journal
 
-Starter voor jouw publieke trading platform op GitHub Pages met Supabase auth + database.
+Persoonlijke forex trading journal met Supabase auth + database.
 
 ## Stack
 
@@ -67,10 +67,11 @@ npm run dev
 
 ## Volgende stap
 
-Na deploy kunnen we meteen de echte modules bouwen:
+Na deploy kan je meteen verder bouwen op de modules:
 
 - MT5 imports/sync
 - Trade blotter + position tracker
 - Setup/checklist journal
 - Performance dashboards
+- Accountability settings (boete, partner-mail, donatielink)
 - Coaching/edge reports

@@ -89,8 +89,31 @@ type TradeForm = {
   exitRating: '-1' | '0' | '1'
   marketCondition: string
   emotion: string
+  biasPlan: string
+  entryPlan: string
+  exitPlan: string
+  focusReview: string
+  chartScreenshotUrl: string
   note: string
   tagsCsv: string
+}
+
+type AccountabilitySettings = {
+  startingBalance: string
+  violationAmount: string
+  charityName: string
+  donationUrl: string
+  partnerEmail: string
+}
+
+type ThemeMode = 'light' | 'dark'
+
+const DEFAULT_ACCOUNTABILITY_SETTINGS: AccountabilitySettings = {
+  startingBalance: '10000',
+  violationAmount: '50',
+  charityName: 'KWF Kankerbestrijding',
+  donationUrl: '',
+  partnerEmail: '',
 }
 
 const createDefaultTradeForm = (accountId = '', setupId = ''): TradeForm => ({
@@ -120,6 +143,11 @@ const createDefaultTradeForm = (accountId = '', setupId = ''): TradeForm => ({
   exitRating: '0',
   marketCondition: '',
   emotion: '',
+  biasPlan: '',
+  entryPlan: '',
+  exitPlan: '',
+  focusReview: '',
+  chartScreenshotUrl: '',
   note: '',
   tagsCsv: '',
 })
@@ -140,6 +168,7 @@ const formatCurrency = (value: number) =>
 const formatPercent = (value: number) => `${value.toFixed(2)}%`
 
 const dayKeyFromIso = (iso: string) => iso.slice(0, 10)
+const monthKeyFromIso = (iso: string) => iso.slice(0, 7)
 
 const getRequiredRForPositiveExpectancy = (winratePercent: number) => {
   const w = winratePercent / 100
@@ -241,10 +270,19 @@ const normalizeTrade = (row: RawTrade): Trade => {
 function App() {
   const [session, setSession] = useState<Session | null>(null)
   const [booting, setBooting] = useState(Boolean(supabase))
-  const [sendingLink, setSendingLink] = useState(false)
+  const [authLoading, setAuthLoading] = useState(false)
   const [submittingTrade, setSubmittingTrade] = useState(false)
   const [loadingData, setLoadingData] = useState(false)
+  const [authMode, setAuthMode] = useState<'login' | 'signup'>('login')
+  const [theme, setTheme] = useState<ThemeMode>(() => {
+    if (typeof window === 'undefined') return 'light'
+    const stored = window.localStorage.getItem('mh_journal_theme')
+    if (stored === 'light' || stored === 'dark') return stored
+    return 'light'
+  })
   const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
   const [message, setMessage] = useState('')
   const [error, setError] = useState(supabaseConfigError ?? '')
 
@@ -272,6 +310,34 @@ function App() {
   const [newSetupName, setNewSetupName] = useState('')
 
   const [form, setForm] = useState<TradeForm>(createDefaultTradeForm())
+  const [accountability, setAccountability] = useState<AccountabilitySettings>(() => {
+    if (typeof window === 'undefined') return DEFAULT_ACCOUNTABILITY_SETTINGS
+    try {
+      const raw = window.localStorage.getItem('mh_journal_accountability')
+      if (!raw) return DEFAULT_ACCOUNTABILITY_SETTINGS
+      const parsed = JSON.parse(raw) as Partial<AccountabilitySettings>
+      return {
+        startingBalance: parsed.startingBalance ?? DEFAULT_ACCOUNTABILITY_SETTINGS.startingBalance,
+        violationAmount: parsed.violationAmount ?? DEFAULT_ACCOUNTABILITY_SETTINGS.violationAmount,
+        charityName: parsed.charityName ?? DEFAULT_ACCOUNTABILITY_SETTINGS.charityName,
+        donationUrl: parsed.donationUrl ?? DEFAULT_ACCOUNTABILITY_SETTINGS.donationUrl,
+        partnerEmail: parsed.partnerEmail ?? DEFAULT_ACCOUNTABILITY_SETTINGS.partnerEmail,
+      }
+    } catch {
+      return DEFAULT_ACCOUNTABILITY_SETTINGS
+    }
+  })
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    window.localStorage.setItem('mh_journal_accountability', JSON.stringify(accountability))
+  }, [accountability])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    window.localStorage.setItem('mh_journal_theme', theme)
+    document.documentElement.setAttribute('data-theme', theme)
+  }, [theme])
 
   useEffect(() => {
     const client = supabase
@@ -533,6 +599,98 @@ function App() {
     }
   }, [filteredTrades])
 
+  const monthlyReturns = useMemo(() => {
+    const closedTrades = filteredTrades.filter((trade) => trade.status !== 'open')
+    const monthMap = new Map<string, { pnl: number; trades: number }>()
+
+    for (const trade of closedTrades) {
+      const key = monthKeyFromIso(trade.closed_at ?? trade.opened_at)
+      const row = monthMap.get(key) ?? { pnl: 0, trades: 0 }
+      row.pnl += trade.net_pnl
+      row.trades += 1
+      monthMap.set(key, row)
+    }
+
+    const startingBalance = asNumberOrNull(accountability.startingBalance) ?? 0
+
+    const aggregated = Array.from(monthMap.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .reduce<{
+        rollingBalance: number
+        rows: Array<{
+          month: string
+          pnl: number
+          trades: number
+          monthReturnPct: number
+          endBalance: number
+        }>
+      }>(
+        (acc, [month, value]) => {
+          const monthStart = acc.rollingBalance
+          const monthReturnPct = monthStart > 0 ? (value.pnl / monthStart) * 100 : 0
+          const endBalance = monthStart + value.pnl
+
+          return {
+            rollingBalance: endBalance,
+            rows: [
+              ...acc.rows,
+              {
+                month,
+                pnl: value.pnl,
+                trades: value.trades,
+                monthReturnPct,
+                endBalance,
+              },
+            ],
+          }
+        },
+        { rollingBalance: startingBalance, rows: [] },
+      )
+
+    return aggregated.rows
+  }, [filteredTrades, accountability.startingBalance])
+
+  const symbolStats = useMemo(() => {
+    const closedTrades = filteredTrades.filter((trade) => trade.status !== 'open')
+    const symbolMap = new Map<
+      string,
+      { trades: number; wins: number; netPnl: number; rTotal: number; rCount: number }
+    >()
+
+    for (const trade of closedTrades) {
+      const key = trade.symbol
+      const row = symbolMap.get(key) ?? { trades: 0, wins: 0, netPnl: 0, rTotal: 0, rCount: 0 }
+      row.trades += 1
+      if (trade.net_pnl > 0) row.wins += 1
+      row.netPnl += trade.net_pnl
+      if (trade.r_multiple !== null) {
+        row.rTotal += trade.r_multiple
+        row.rCount += 1
+      }
+      symbolMap.set(key, row)
+    }
+
+    return Array.from(symbolMap.entries())
+      .map(([symbol, row]) => ({
+        symbol,
+        trades: row.trades,
+        winrate: row.trades > 0 ? (row.wins / row.trades) * 100 : 0,
+        netPnl: row.netPnl,
+        avgR: row.rCount > 0 ? row.rTotal / row.rCount : null,
+      }))
+      .sort((a, b) => b.netPnl - a.netPnl)
+  }, [filteredTrades])
+
+  const violationStats = useMemo(() => {
+    const violationCount = filteredTrades.filter((trade) => !trade.plan_followed).length
+    const finePerViolation = asNumberOrNull(accountability.violationAmount) ?? 0
+    return {
+      violationCount,
+      finePerViolation,
+      fineTotal: violationCount * finePerViolation,
+    }
+  }, [filteredTrades, accountability.violationAmount])
+
   const calendarCells = useMemo(() => {
     const year = selectedMonth.getUTCFullYear()
     const month = selectedMonth.getUTCMonth()
@@ -557,15 +715,77 @@ function App() {
     })
   }, [selectedMonth, tradeMetrics.dayMap, filteredTrades])
 
-  const sendMagicLink = async (e: FormEvent) => {
+  const signInWithPassword = async (e: FormEvent) => {
     e.preventDefault()
     if (!supabase) return
-    setSendingLink(true)
+    setAuthLoading(true)
+    setError('')
+    setMessage('')
+
+    const { error: authError } = await supabase.auth.signInWithPassword({
+      email,
+      password,
+    })
+
+    if (authError) {
+      if (authError.message.toLowerCase().includes('invalid login credentials')) {
+        setError(
+          'Invalid login credentials. Controleer wachtwoord of bevestig eerst je e-mail. Gebruik eventueel "Bevestigingsmail opnieuw sturen".',
+        )
+      } else {
+        setError(authError.message)
+      }
+    }
+
+    setAuthLoading(false)
+  }
+
+  const signUpWithPassword = async (e: FormEvent) => {
+    e.preventDefault()
+    if (!supabase) return
+
+    if (password.length < 6) {
+      setError('Wachtwoord moet minstens 6 tekens bevatten.')
+      return
+    }
+
+    if (password !== confirmPassword) {
+      setError('Wachtwoorden komen niet overeen.')
+      return
+    }
+
+    setAuthLoading(true)
     setError('')
     setMessage('')
 
     const redirectTo = `${window.location.origin}${window.location.pathname}`
+    const { data, error: authError } = await supabase.auth.signUp({
+      email,
+      password,
+      options: { emailRedirectTo: redirectTo },
+    })
 
+    if (authError) {
+      setError(authError.message)
+    } else if (!data.session) {
+      setMessage('Account gemaakt. Bevestig je e-mail en log daarna in.')
+      setAuthMode('login')
+      setPassword('')
+      setConfirmPassword('')
+    } else {
+      setMessage('Account aangemaakt en ingelogd.')
+    }
+
+    setAuthLoading(false)
+  }
+
+  const sendMagicLinkFallback = async () => {
+    if (!supabase || !email.trim()) return
+    setAuthLoading(true)
+    setError('')
+    setMessage('')
+
+    const redirectTo = `${window.location.origin}${window.location.pathname}`
     const { error: authError } = await supabase.auth.signInWithOtp({
       email,
       options: { emailRedirectTo: redirectTo },
@@ -577,7 +797,53 @@ function App() {
       setMessage('Magic link verstuurd. Check je inbox.')
     }
 
-    setSendingLink(false)
+    setAuthLoading(false)
+  }
+
+  const resendConfirmation = async () => {
+    if (!supabase || !email.trim()) return
+    setAuthLoading(true)
+    setError('')
+    setMessage('')
+
+    const redirectTo = `${window.location.origin}${window.location.pathname}`
+    const { error: resendError } = await supabase.auth.resend({
+      type: 'signup',
+      email,
+      options: { emailRedirectTo: redirectTo },
+    })
+
+    if (resendError) {
+      setError(resendError.message)
+    } else {
+      setMessage('Bevestigingsmail opnieuw verstuurd. Check je inbox/spam.')
+    }
+
+    setAuthLoading(false)
+  }
+
+  const sendPasswordReset = async () => {
+    if (!supabase || !email.trim()) return
+    setAuthLoading(true)
+    setError('')
+    setMessage('')
+
+    const redirectTo = `${window.location.origin}${window.location.pathname}`
+    const { error: resetError } = await supabase.auth.resetPasswordForEmail(email, {
+      redirectTo,
+    })
+
+    if (resetError) {
+      setError(resetError.message)
+    } else {
+      setMessage('Reset e-mail verstuurd. Open de link en kies een nieuw wachtwoord.')
+    }
+
+    setAuthLoading(false)
+  }
+
+  const toggleTheme = () => {
+    setTheme((prev) => (prev === 'light' ? 'dark' : 'light'))
   }
 
   const signOut = async () => {
@@ -679,6 +945,11 @@ function App() {
       custom_stats: {
         market_condition: form.marketCondition.trim(),
         emotion: form.emotion.trim(),
+        bias_plan: form.biasPlan.trim(),
+        entry_plan: form.entryPlan.trim(),
+        exit_plan: form.exitPlan.trim(),
+        focus_review: form.focusReview.trim(),
+        chart_screenshot_url: form.chartScreenshotUrl.trim(),
       },
       note: form.note.trim() || null,
     }
@@ -738,7 +1009,10 @@ function App() {
     return (
       <main className="shell">
         <section className="card auth-card">
-          <h1>TradeOS</h1>
+          <button type="button" className="theme-toggle theme-toggle-auth" onClick={toggleTheme}>
+            {theme === 'light' ? 'Dark modus' : 'Light modus'}
+          </button>
+          <h1>MH Journal</h1>
           <p className="err">{supabaseConfigError}</p>
         </section>
       </main>
@@ -748,7 +1022,7 @@ function App() {
   if (booting) {
     return (
       <main className="shell">
-        <p>TradeOS opstarten...</p>
+        <p>MH Journal opstarten...</p>
       </main>
     )
   }
@@ -757,9 +1031,36 @@ function App() {
     return (
       <main className="shell">
         <section className="card auth-card">
-          <h1>TradeOS</h1>
-          <p>Login met magic link zodat jij veilig je trading data kan tracken.</p>
-          <form onSubmit={sendMagicLink} className="stack">
+          <button type="button" className="theme-toggle theme-toggle-auth" onClick={toggleTheme}>
+            {theme === 'light' ? 'Dark modus' : 'Light modus'}
+          </button>
+          <h1>MH Journal</h1>
+          <p>Log in met e-mail en wachtwoord om je trading data veilig te beheren.</p>
+          <div className="auth-mode-tabs">
+            <button
+              type="button"
+              className={`auth-mode-tab ${authMode === 'login' ? 'active' : ''}`}
+              onClick={() => {
+                setAuthMode('login')
+                setMessage('')
+                setError('')
+              }}
+            >
+              Inloggen
+            </button>
+            <button
+              type="button"
+              className={`auth-mode-tab ${authMode === 'signup' ? 'active' : ''}`}
+              onClick={() => {
+                setAuthMode('signup')
+                setMessage('')
+                setError('')
+              }}
+            >
+              Registreren
+            </button>
+          </div>
+          <form onSubmit={authMode === 'login' ? signInWithPassword : signUpWithPassword} className="stack">
             <input
               type="email"
               value={email}
@@ -767,10 +1068,56 @@ function App() {
               placeholder="jij@domein.com"
               required
             />
-            <button type="submit" disabled={sendingLink}>
-              {sendingLink ? 'Versturen...' : 'Stuur magic link'}
+            <input
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="Wachtwoord"
+              required
+            />
+            {authMode === 'signup' && (
+              <input
+                type="password"
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+                placeholder="Herhaal wachtwoord"
+                required
+              />
+            )}
+            <button type="submit" disabled={authLoading}>
+              {authLoading
+                ? 'Even bezig...'
+                : authMode === 'login'
+                  ? 'Inloggen'
+                  : 'Account aanmaken'}
             </button>
           </form>
+          <button
+            type="button"
+            className="ghost-button"
+            onClick={sendMagicLinkFallback}
+            disabled={authLoading || !email.trim()}
+          >
+            Of stuur toch een magic link
+          </button>
+          <div className="auth-help-actions">
+            <button
+              type="button"
+              className="ghost-button"
+              onClick={resendConfirmation}
+              disabled={authLoading || !email.trim()}
+            >
+              Bevestigingsmail opnieuw sturen
+            </button>
+            <button
+              type="button"
+              className="ghost-button"
+              onClick={sendPasswordReset}
+              disabled={authLoading || !email.trim()}
+            >
+              Wachtwoord reset mail sturen
+            </button>
+          </div>
           {message && <p className="ok">{message}</p>}
           {error && <p className="err">{error}</p>}
         </section>
@@ -785,7 +1132,7 @@ function App() {
   return (
     <main className="dashboard-shell">
       <aside className="sidebar">
-        <div className="brand">TradeOS</div>
+        <div className="brand">MH Journal</div>
         <nav>
           <button className="nav-item active">Dashboard</button>
           <button className="nav-item">Trading Journal</button>
@@ -794,6 +1141,9 @@ function App() {
         </nav>
         <div className="sidebar-footer">
           <p>{session.user.email}</p>
+          <button type="button" className="theme-toggle" onClick={toggleTheme}>
+            {theme === 'light' ? 'Dark modus' : 'Light modus'}
+          </button>
           <button onClick={signOut}>Uitloggen</button>
         </div>
       </aside>
@@ -802,7 +1152,7 @@ function App() {
         <header className="toolbar card">
           <div className="toolbar-left">
             <h1>Performance Dashboard</h1>
-            <p>Edgewonk-style evaluatie op je eigen trading data.</p>
+            <p>Persoonlijke forex journal met accountability, maandrendement en setup-evaluatie.</p>
           </div>
           <div className="toolbar-right filters-stack">
             <div className="filters-grid basic-filters">
@@ -919,6 +1269,91 @@ function App() {
             <p className="muted">
               Accounts: {accounts.length} | Setups: {setups.length} | Tags: {tags.length}
             </p>
+          </article>
+          <article className="card workspace-card">
+            <h2>Accountability Settings</h2>
+            <div className="mini-row">
+              <input
+                value={accountability.startingBalance}
+                onChange={(e) =>
+                  setAccountability((prev) => ({ ...prev, startingBalance: e.target.value }))
+                }
+                placeholder="Startkapitaal (bv. 10000)"
+              />
+              <input
+                value={accountability.violationAmount}
+                onChange={(e) =>
+                  setAccountability((prev) => ({ ...prev, violationAmount: e.target.value }))
+                }
+                placeholder="Boete per violation (€)"
+              />
+            </div>
+            <div className="mini-row">
+              <input
+                value={accountability.charityName}
+                onChange={(e) =>
+                  setAccountability((prev) => ({ ...prev, charityName: e.target.value }))
+                }
+                placeholder="Goed doel"
+              />
+              <input
+                type="email"
+                value={accountability.partnerEmail}
+                onChange={(e) =>
+                  setAccountability((prev) => ({ ...prev, partnerEmail: e.target.value }))
+                }
+                placeholder="Partner/coach email"
+              />
+            </div>
+            <input
+              value={accountability.donationUrl}
+              onChange={(e) => setAccountability((prev) => ({ ...prev, donationUrl: e.target.value }))}
+              placeholder="Donatie link"
+            />
+          </article>
+          <article className="card workspace-card">
+            <h2>Violation Tracker</h2>
+            <div className="mini-row violation-grid">
+              <div>
+                <p className="muted">Open violations</p>
+                <h3>{violationStats.violationCount}</h3>
+              </div>
+              <div>
+                <p className="muted">Open boete totaal</p>
+                <h3>{formatCurrency(violationStats.fineTotal)}</h3>
+              </div>
+            </div>
+            <p className="muted">
+              {violationStats.violationCount > 0
+                ? `Plan gebroken trades worden geteld tegen ${formatCurrency(
+                    violationStats.finePerViolation,
+                  )} per trade.`
+                : 'Geen open plan-violations.'}
+            </p>
+            {accountability.donationUrl.trim() && (
+              <a href={accountability.donationUrl} target="_blank" rel="noreferrer" className="donation-link">
+                Ga naar donatielink ({accountability.charityName || 'goed doel'})
+              </a>
+            )}
+          </article>
+          <article className="card workspace-card">
+            <h2>Monthly Return %</h2>
+            <div className="monthly-stack">
+              {monthlyReturns.slice(-6).map((month) => {
+                const positive = month.monthReturnPct >= 0
+                const width = `${Math.min(100, Math.max(6, Math.abs(month.monthReturnPct) * 3))}%`
+                return (
+                  <div key={month.month} className="month-row">
+                    <span>{month.month}</span>
+                    <div className="month-bar">
+                      <div className={`month-fill ${positive ? 'pos' : 'neg'}`} style={{ width }} />
+                    </div>
+                    <strong>{formatPercent(month.monthReturnPct)}</strong>
+                  </div>
+                )
+              })}
+              {monthlyReturns.length === 0 && <p className="muted">Nog geen maanddata beschikbaar.</p>}
+            </div>
           </article>
         </section>
 
@@ -1074,6 +1509,42 @@ function App() {
                   placeholder="Custom stat: emotion"
                 />
               </div>
+
+              <div className="two-col">
+                <textarea
+                  value={form.biasPlan}
+                  onChange={(e) => setForm((prev) => ({ ...prev, biasPlan: e.target.value }))}
+                  rows={2}
+                  placeholder="Bias plan (waarom deze richting?)"
+                />
+                <textarea
+                  value={form.entryPlan}
+                  onChange={(e) => setForm((prev) => ({ ...prev, entryPlan: e.target.value }))}
+                  rows={2}
+                  placeholder="Entry plan"
+                />
+              </div>
+
+              <div className="two-col">
+                <textarea
+                  value={form.exitPlan}
+                  onChange={(e) => setForm((prev) => ({ ...prev, exitPlan: e.target.value }))}
+                  rows={2}
+                  placeholder="Exit plan"
+                />
+                <textarea
+                  value={form.focusReview}
+                  onChange={(e) => setForm((prev) => ({ ...prev, focusReview: e.target.value }))}
+                  rows={2}
+                  placeholder="Focus/gevoel review"
+                />
+              </div>
+
+              <input
+                value={form.chartScreenshotUrl}
+                onChange={(e) => setForm((prev) => ({ ...prev, chartScreenshotUrl: e.target.value }))}
+                placeholder="Chart screenshot URL"
+              />
 
               <div className="three-col">
                 <select
@@ -1250,6 +1721,35 @@ function App() {
         </section>
 
         <section className="card table-card">
+          <h2>Performance by Symbol</h2>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Symbol</th>
+                  <th>Trades</th>
+                  <th>Winrate</th>
+                  <th>Net P&L</th>
+                  <th>Avg R</th>
+                </tr>
+              </thead>
+              <tbody>
+                {symbolStats.map((row) => (
+                  <tr key={row.symbol}>
+                    <td>{row.symbol}</td>
+                    <td>{row.trades}</td>
+                    <td>{formatPercent(row.winrate)}</td>
+                    <td className={row.netPnl >= 0 ? 'pos' : 'neg'}>{formatCurrency(row.netPnl)}</td>
+                    <td>{row.avgR === null ? '-' : `${row.avgR.toFixed(2)}R`}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {symbolStats.length === 0 && <p className="muted">Geen trades voor symbol-analyse.</p>}
+        </section>
+
+        <section className="card table-card">
           <h2>Trades</h2>
           <div className="table-wrap">
             <table>
@@ -1267,6 +1767,7 @@ function App() {
                   <th>Tilt</th>
                   <th>Tags</th>
                   <th>Plan</th>
+                  <th>Chart</th>
                 </tr>
               </thead>
               <tbody>
@@ -1309,6 +1810,15 @@ function App() {
                       </td>
                       <td>{(tradeTags[trade.id] ?? []).join(', ') || '-'}</td>
                       <td>{trade.plan_followed ? 'Yes' : 'No'}</td>
+                      <td>
+                        {trade.custom_stats.chart_screenshot_url ? (
+                          <a href={trade.custom_stats.chart_screenshot_url} target="_blank" rel="noreferrer">
+                            Open
+                          </a>
+                        ) : (
+                          '-'
+                        )}
+                      </td>
                     </tr>
                   )
                 })}
