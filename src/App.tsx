@@ -8,6 +8,7 @@ type TradingAccount = {
   name: string
   broker: string | null
   account_currency: string
+  starting_balance: number | null
 }
 
 type Setup = {
@@ -107,13 +108,48 @@ type AccountabilitySettings = {
 }
 
 type ThemeMode = 'light' | 'dark'
+type PnlPeriod = 'month' | 'quarter' | 'year'
+
+type Mt5SyncSettings = {
+  accountLabel: string
+  apiKey: string
+  autoSyncEnabled: boolean
+  broker: string
+  server: string
+}
+
+type EditTradeForm = {
+  id: string
+  symbol: string
+  side: 'long' | 'short'
+  positionSize: string
+  ticketReference: string
+  entryPrice: string
+  exitPrice: string
+  stopLoss: string
+  takeProfit: string
+  openedAt: string
+  closedAt: string
+  netPnl: string
+  fees: string
+  chartScreenshotUrl: string
+  note: string
+}
 
 const DEFAULT_ACCOUNTABILITY_SETTINGS: AccountabilitySettings = {
-  startingBalance: '10000',
+  startingBalance: '0',
   violationAmount: '50',
   charityName: 'KWF Kankerbestrijding',
   donationUrl: '',
   partnerEmail: '',
+}
+
+const DEFAULT_MT5_SYNC_SETTINGS: Mt5SyncSettings = {
+  accountLabel: 'Main MT5',
+  apiKey: '',
+  autoSyncEnabled: false,
+  broker: '',
+  server: '',
 }
 
 const createDefaultTradeForm = (accountId = '', setupId = ''): TradeForm => ({
@@ -169,44 +205,64 @@ const formatPercent = (value: number) => `${value.toFixed(2)}%`
 
 const dayKeyFromIso = (iso: string) => iso.slice(0, 10)
 const monthKeyFromIso = (iso: string) => iso.slice(0, 7)
-
-const getRequiredRForPositiveExpectancy = (winratePercent: number) => {
-  const w = winratePercent / 100
-  if (w <= 0) return Number.POSITIVE_INFINITY
-  if (w >= 1) return 0
-  return (1 - w) / w
+const toDateTimeInputValue = (iso: string | null) => {
+  if (!iso) return ''
+  const date = new Date(iso)
+  const localTime = new Date(date.getTime() - date.getTimezoneOffset() * 60000)
+  return localTime.toISOString().slice(0, 16)
 }
 
-const getPlannedR = (trade: Trade) => {
-  if (
-    trade.entry_price === null ||
-    trade.stop_loss === null ||
-    trade.take_profit === null ||
-    trade.entry_price === trade.stop_loss
-  ) {
-    return null
-  }
-
-  const risk =
-    trade.side === 'long'
-      ? trade.entry_price - trade.stop_loss
-      : trade.stop_loss - trade.entry_price
-  const reward =
-    trade.side === 'long'
-      ? trade.take_profit - trade.entry_price
-      : trade.entry_price - trade.take_profit
-
-  if (risk <= 0) return null
-  return reward / risk
+const formatDayModalTitle = (dayKey: string) => {
+  const title = new Date(`${dayKey}T00:00:00Z`).toLocaleDateString('nl-BE', {
+    weekday: 'long',
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric',
+  })
+  return title.charAt(0).toUpperCase() + title.slice(1)
 }
 
-const getRealizedR = (trade: Trade) => trade.r_multiple
-
-const getTiltScore = (trade: Trade) => {
-  const ratings: number[] = [trade.entry_rating, trade.management_rating, trade.exit_rating]
-  const avg = ratings.reduce((sum, r) => sum + r, 0) / ratings.length
-  return Math.round(((avg + 1) / 2) * 100)
+const quarterKeyFromIso = (iso: string) => {
+  const d = new Date(iso)
+  const q = Math.floor(d.getUTCMonth() / 3) + 1
+  return `${d.getUTCFullYear()}-Q${q}`
 }
+
+const createEmptyEditTradeForm = (): EditTradeForm => ({
+  id: '',
+  symbol: '',
+  side: 'long',
+  positionSize: '',
+  ticketReference: '',
+  entryPrice: '',
+  exitPrice: '',
+  stopLoss: '',
+  takeProfit: '',
+  openedAt: '',
+  closedAt: '',
+  netPnl: '',
+  fees: '',
+  chartScreenshotUrl: '',
+  note: '',
+})
+
+const createEditTradeForm = (trade: Trade): EditTradeForm => ({
+  id: trade.id,
+  symbol: trade.symbol,
+  side: trade.side,
+  positionSize: trade.position_size === null ? '' : String(trade.position_size),
+  ticketReference: trade.custom_stats.ticket_reference ?? trade.custom_stats.ticket_ref ?? '',
+  entryPrice: trade.entry_price === null ? '' : String(trade.entry_price),
+  exitPrice: trade.exit_price === null ? '' : String(trade.exit_price),
+  stopLoss: trade.stop_loss === null ? '' : String(trade.stop_loss),
+  takeProfit: trade.take_profit === null ? '' : String(trade.take_profit),
+  openedAt: toDateTimeInputValue(trade.opened_at),
+  closedAt: toDateTimeInputValue(trade.closed_at),
+  netPnl: String(trade.net_pnl),
+  fees: String(trade.fees ?? 0),
+  chartScreenshotUrl: trade.custom_stats.chart_screenshot_url ?? '',
+  note: trade.note ?? '',
+})
 
 const normalizeTrade = (row: RawTrade): Trade => {
   const accountRel = Array.isArray(row.trading_accounts)
@@ -296,18 +352,24 @@ function App() {
     const now = new Date()
     return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1))
   })
+  const [pnlPeriod, setPnlPeriod] = useState<PnlPeriod>('month')
+  const [manualTradeOpen, setManualTradeOpen] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [selectedDayKey, setSelectedDayKey] = useState<string | null>(null)
+  const [editingTradeId, setEditingTradeId] = useState<string | null>(null)
+  const [editingTradeForm, setEditingTradeForm] = useState<EditTradeForm>(createEmptyEditTradeForm())
+  const [savingEditTrade, setSavingEditTrade] = useState(false)
+  const [deletingTradeId, setDeletingTradeId] = useState<string | null>(null)
 
-  const [symbolFilter, setSymbolFilter] = useState('')
-  const [setupFilter, setSetupFilter] = useState('all')
-  const [sessionFilter, setSessionFilter] = useState('all')
-  const [tagFilter, setTagFilter] = useState('all')
-  const [planFilter, setPlanFilter] = useState<'all' | 'followed' | 'broken'>('all')
-  const [minConfidenceFilter, setMinConfidenceFilter] = useState('')
-  const [emotionFilter, setEmotionFilter] = useState('all')
-  const [marketConditionFilter, setMarketConditionFilter] = useState('all')
-
-  const [newAccountName, setNewAccountName] = useState('')
-  const [newSetupName, setNewSetupName] = useState('')
+  const symbolFilter: string = ''
+  const setupFilter: string = 'all'
+  const sessionFilter: string = 'all'
+  const tagFilter: string = 'all'
+  const planFilter: 'all' | 'followed' | 'broken' = 'all'
+  const minConfidenceFilter: string = ''
+  const emotionFilter: string = 'all'
+  const marketConditionFilter: string = 'all'
+  const [accountCurrency, setAccountCurrency] = useState('EUR')
 
   const [form, setForm] = useState<TradeForm>(createDefaultTradeForm())
   const [accountability, setAccountability] = useState<AccountabilitySettings>(() => {
@@ -327,11 +389,33 @@ function App() {
       return DEFAULT_ACCOUNTABILITY_SETTINGS
     }
   })
+  const [mt5Sync, setMt5Sync] = useState<Mt5SyncSettings>(() => {
+    if (typeof window === 'undefined') return DEFAULT_MT5_SYNC_SETTINGS
+    try {
+      const raw = window.localStorage.getItem('mh_journal_mt5_sync')
+      if (!raw) return DEFAULT_MT5_SYNC_SETTINGS
+      const parsed = JSON.parse(raw) as Partial<Mt5SyncSettings>
+      return {
+        accountLabel: parsed.accountLabel ?? DEFAULT_MT5_SYNC_SETTINGS.accountLabel,
+        apiKey: parsed.apiKey ?? DEFAULT_MT5_SYNC_SETTINGS.apiKey,
+        autoSyncEnabled: parsed.autoSyncEnabled ?? DEFAULT_MT5_SYNC_SETTINGS.autoSyncEnabled,
+        broker: parsed.broker ?? DEFAULT_MT5_SYNC_SETTINGS.broker,
+        server: parsed.server ?? DEFAULT_MT5_SYNC_SETTINGS.server,
+      }
+    } catch {
+      return DEFAULT_MT5_SYNC_SETTINGS
+    }
+  })
 
   useEffect(() => {
     if (typeof window === 'undefined') return
     window.localStorage.setItem('mh_journal_accountability', JSON.stringify(accountability))
   }, [accountability])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    window.localStorage.setItem('mh_journal_mt5_sync', JSON.stringify(mt5Sync))
+  }, [mt5Sync])
 
   useEffect(() => {
     if (typeof window === 'undefined') return
@@ -373,7 +457,7 @@ function App() {
         const [accountsResult, setupsResult, tagsResult, tradesResult, tradeTagsResult] = await Promise.all([
           client
             .from('trading_accounts')
-            .select('id, name, broker, account_currency')
+            .select('id, name, broker, account_currency, starting_balance')
             .order('created_at', { ascending: true }),
           client.from('setups').select('id, name').order('created_at', { ascending: true }),
           client.from('tags').select('id, name, color').order('name', { ascending: true }),
@@ -462,6 +546,7 @@ function App() {
       setTags(loadedTags)
       setTrades(loadedTrades)
       setTradeTags(tagMap)
+      setAccountCurrency(loadedAccounts[0]?.account_currency ?? 'EUR')
 
       setForm((prev) => {
         const accountId = prev.accountId || loadedAccounts[0]?.id || ''
@@ -474,24 +559,6 @@ function App() {
 
     loadWorkspace()
   }, [session])
-
-  const emotionOptions = useMemo(() => {
-    const values = new Set<string>()
-    trades.forEach((trade) => {
-      const v = trade.custom_stats.emotion?.trim()
-      if (v) values.add(v)
-    })
-    return Array.from(values).sort((a, b) => a.localeCompare(b))
-  }, [trades])
-
-  const marketConditionOptions = useMemo(() => {
-    const values = new Set<string>()
-    trades.forEach((trade) => {
-      const v = trade.custom_stats.market_condition?.trim()
-      if (v) values.add(v)
-    })
-    return Array.from(values).sort((a, b) => a.localeCompare(b))
-  }, [trades])
 
   const filteredTrades = useMemo(() => {
     return trades.filter((trade) => {
@@ -599,6 +666,17 @@ function App() {
     }
   }, [filteredTrades])
 
+  const activeTradingAccount = useMemo(
+    () => accounts.find((account) => account.id === form.accountId) ?? accounts[0] ?? null,
+    [accounts, form.accountId],
+  )
+  const effectiveStartingBalance = useMemo(() => {
+    if (activeTradingAccount?.starting_balance !== null && activeTradingAccount?.starting_balance !== undefined) {
+      return Number(activeTradingAccount.starting_balance)
+    }
+    return 0
+  }, [activeTradingAccount])
+
   const monthlyReturns = useMemo(() => {
     const closedTrades = filteredTrades.filter((trade) => trade.status !== 'open')
     const monthMap = new Map<string, { pnl: number; trades: number }>()
@@ -611,7 +689,7 @@ function App() {
       monthMap.set(key, row)
     }
 
-    const startingBalance = asNumberOrNull(accountability.startingBalance) ?? 0
+    const startingBalance = effectiveStartingBalance
 
     const aggregated = Array.from(monthMap.entries())
       .sort(([a], [b]) => a.localeCompare(b))
@@ -648,7 +726,7 @@ function App() {
       )
 
     return aggregated.rows
-  }, [filteredTrades, accountability.startingBalance])
+  }, [filteredTrades, effectiveStartingBalance])
 
   const symbolStats = useMemo(() => {
     const closedTrades = filteredTrades.filter((trade) => trade.status !== 'open')
@@ -691,6 +769,97 @@ function App() {
     }
   }, [filteredTrades, accountability.violationAmount])
 
+  const accountSnapshot = useMemo(() => {
+    const startingBalance = effectiveStartingBalance
+    const currentBalance = startingBalance + tradeMetrics.netReturn
+    const returnPct = startingBalance > 0 ? (tradeMetrics.netReturn / startingBalance) * 100 : 0
+    const profitableMonths = monthlyReturns.filter((row) => row.pnl > 0).length
+    const losingMonths = monthlyReturns.filter((row) => row.pnl < 0).length
+
+    return {
+      startingBalance,
+      currentBalance,
+      returnPct,
+      profitableMonths,
+      losingMonths,
+    }
+  }, [effectiveStartingBalance, tradeMetrics.netReturn, monthlyReturns])
+
+  const dashboardMetrics = useMemo(() => {
+    const closedTrades = filteredTrades.filter((trade) => trade.status !== 'open')
+    const followed = closedTrades.filter((trade) => trade.plan_followed).length
+    const wins = closedTrades.filter((trade) => trade.net_pnl > 0).length
+    const losses = closedTrades.filter((trade) => trade.net_pnl < 0).length
+    const openTrades = filteredTrades.filter((trade) => trade.status === 'open').length
+    const avgPerTrade = closedTrades.length > 0 ? tradeMetrics.netReturn / closedTrades.length : 0
+    const planAdherence = closedTrades.length > 0 ? (followed / closedTrades.length) * 100 : 0
+    return {
+      wins,
+      losses,
+      followed,
+      openTrades,
+      avgPerTrade,
+      planAdherence,
+    }
+  }, [filteredTrades, tradeMetrics.netReturn])
+
+  const pnlBars = useMemo(() => {
+    const closedTrades = filteredTrades.filter((trade) => trade.status !== 'open')
+    const map = new Map<string, number>()
+
+    for (const trade of closedTrades) {
+      const iso = trade.closed_at ?? trade.opened_at
+      const key =
+        pnlPeriod === 'month'
+          ? monthKeyFromIso(iso)
+          : pnlPeriod === 'quarter'
+            ? quarterKeyFromIso(iso)
+            : iso.slice(0, 4)
+      map.set(key, (map.get(key) ?? 0) + trade.net_pnl)
+    }
+
+    return Array.from(map.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .slice(-6)
+      .map(([label, value]) => ({ label, value }))
+  }, [filteredTrades, pnlPeriod])
+
+  const activityTrades = useMemo(() => filteredTrades.slice(0, 8), [filteredTrades])
+  const dayTradesMap = useMemo(() => {
+    const map = new Map<string, Trade[]>()
+    for (const trade of filteredTrades) {
+      const key = dayKeyFromIso(trade.closed_at ?? trade.opened_at)
+      const rows = map.get(key) ?? []
+      rows.push(trade)
+      map.set(key, rows)
+    }
+
+    for (const [key, rows] of map.entries()) {
+      rows.sort((a, b) => b.opened_at.localeCompare(a.opened_at))
+      map.set(key, rows)
+    }
+
+    return map
+  }, [filteredTrades])
+
+  const selectedDayTrades = useMemo(
+    () => (selectedDayKey ? dayTradesMap.get(selectedDayKey) ?? [] : []),
+    [selectedDayKey, dayTradesMap],
+  )
+  const selectedDayPnl = useMemo(
+    () => selectedDayTrades.reduce((sum, trade) => sum + trade.net_pnl, 0),
+    [selectedDayTrades],
+  )
+  const selectedDayReturnPct = useMemo(() => {
+    const start = effectiveStartingBalance
+    if (start <= 0) return 0
+    return (selectedDayPnl / start) * 100
+  }, [selectedDayPnl, effectiveStartingBalance])
+  const editingTrade = useMemo(
+    () => trades.find((trade) => trade.id === editingTradeId) ?? null,
+    [trades, editingTradeId],
+  )
+
   const calendarCells = useMemo(() => {
     const year = selectedMonth.getUTCFullYear()
     const month = selectedMonth.getUTCMonth()
@@ -714,6 +883,18 @@ function App() {
       }
     })
   }, [selectedMonth, tradeMetrics.dayMap, filteredTrades])
+
+  const openEditTrade = (tradeId: string) => {
+    const trade = trades.find((row) => row.id === tradeId)
+    if (!trade) return
+    setEditingTradeForm(createEditTradeForm(trade))
+    setEditingTradeId(tradeId)
+  }
+
+  const closeEditTrade = () => {
+    setEditingTradeId(null)
+    setEditingTradeForm(createEmptyEditTradeForm())
+  }
 
   const signInWithPassword = async (e: FormEvent) => {
     e.preventDefault()
@@ -853,46 +1034,6 @@ function App() {
     if (signOutError) setError(signOutError.message)
   }
 
-  const createAccount = async (e: FormEvent) => {
-    e.preventDefault()
-    if (!supabase || !newAccountName.trim()) return
-
-    const { data, error: insertError } = await supabase
-      .from('trading_accounts')
-      .insert({ name: newAccountName.trim(), account_currency: 'USD', platform: 'mt5' })
-      .select('id, name, broker, account_currency')
-      .single()
-
-    if (insertError) {
-      setError(insertError.message)
-      return
-    }
-
-    setAccounts((prev) => [...prev, data as TradingAccount])
-    setNewAccountName('')
-    setForm((prev) => ({ ...prev, accountId: data.id }))
-  }
-
-  const createSetup = async (e: FormEvent) => {
-    e.preventDefault()
-    if (!supabase || !newSetupName.trim()) return
-
-    const { data, error: insertError } = await supabase
-      .from('setups')
-      .insert({ name: newSetupName.trim() })
-      .select('id, name')
-      .single()
-
-    if (insertError) {
-      setError(insertError.message)
-      return
-    }
-
-    setSetups((prev) => [...prev, data as Setup])
-    setNewSetupName('')
-    setForm((prev) => ({ ...prev, setupId: data.id }))
-  }
-
   const createTrade = async (e: FormEvent) => {
     e.preventDefault()
     if (!supabase) return
@@ -950,6 +1091,7 @@ function App() {
         exit_plan: form.exitPlan.trim(),
         focus_review: form.focusReview.trim(),
         chart_screenshot_url: form.chartScreenshotUrl.trim(),
+        ticket_reference: form.tagsCsv.trim(),
       },
       note: form.note.trim() || null,
     }
@@ -1003,6 +1145,120 @@ function App() {
 
     setForm(createDefaultTradeForm(form.accountId || accounts[0]?.id || '', form.setupId || setups[0]?.id || ''))
     setSubmittingTrade(false)
+  }
+
+  const saveEditedTrade = async (e: FormEvent) => {
+    e.preventDefault()
+    if (!supabase || !editingTrade) return
+
+    const symbol = editingTradeForm.symbol.trim().toUpperCase()
+    const netPnl = asNumberOrNull(editingTradeForm.netPnl)
+    if (!symbol || netPnl === null) {
+      setError('Symbol en P&L zijn verplicht.')
+      return
+    }
+
+    setSavingEditTrade(true)
+    setError('')
+
+    const openedAt = editingTradeForm.openedAt
+      ? new Date(editingTradeForm.openedAt).toISOString()
+      : editingTrade.opened_at
+    const closedAt = editingTradeForm.closedAt
+      ? new Date(editingTradeForm.closedAt).toISOString()
+      : null
+    const riskAmount = editingTrade.risk_amount
+    const rMultiple = riskAmount && riskAmount !== 0 ? netPnl / riskAmount : null
+
+    const updatePayload = {
+      symbol,
+      side: editingTradeForm.side,
+      opened_at: openedAt,
+      closed_at: closedAt,
+      status: closedAt ? 'closed' : 'open',
+      entry_price: asNumberOrNull(editingTradeForm.entryPrice),
+      exit_price: asNumberOrNull(editingTradeForm.exitPrice),
+      stop_loss: asNumberOrNull(editingTradeForm.stopLoss),
+      take_profit: asNumberOrNull(editingTradeForm.takeProfit),
+      position_size: asNumberOrNull(editingTradeForm.positionSize),
+      fees: asNumberOrNull(editingTradeForm.fees) ?? 0,
+      net_pnl: netPnl,
+      r_multiple: rMultiple,
+      note: editingTradeForm.note.trim() || null,
+      custom_stats: {
+        ...(editingTrade.custom_stats ?? {}),
+        ticket_reference: editingTradeForm.ticketReference.trim(),
+        chart_screenshot_url: editingTradeForm.chartScreenshotUrl.trim(),
+      },
+    }
+
+    const { data: updatedTrade, error: updateError } = await supabase
+      .from('trades')
+      .update(updatePayload)
+      .eq('id', editingTrade.id)
+      .select(
+        'id, symbol, side, session, status, opened_at, closed_at, entry_price, exit_price, stop_loss, take_profit, risk_amount, position_size, fees, swap, net_pnl, r_multiple, confidence, plan_followed, entry_comment, management_comment, exit_comment, entry_rating, management_rating, exit_rating, custom_stats, note, account_id, setup_id, trading_accounts(name, account_currency), setups(name)',
+      )
+      .single()
+
+    if (updateError || !updatedTrade) {
+      setError(updateError?.message ?? 'Trade kon niet opgeslagen worden.')
+      setSavingEditTrade(false)
+      return
+    }
+
+    const normalized = normalizeTrade(updatedTrade as unknown as RawTrade)
+    setTrades((prev) => prev.map((trade) => (trade.id === normalized.id ? normalized : trade)))
+    setSavingEditTrade(false)
+    closeEditTrade()
+  }
+
+  const deleteTrade = async (tradeId: string) => {
+    if (!supabase) return
+    setDeletingTradeId(tradeId)
+    setError('')
+
+    const { error: deleteError } = await supabase.from('trades').delete().eq('id', tradeId)
+    if (deleteError) {
+      setError(deleteError.message)
+      setDeletingTradeId(null)
+      return
+    }
+
+    setTrades((prev) => prev.filter((trade) => trade.id !== tradeId))
+    setTradeTags((prev) => {
+      const next = { ...prev }
+      delete next[tradeId]
+      return next
+    })
+    setDeletingTradeId(null)
+
+    if (editingTradeId === tradeId) closeEditTrade()
+  }
+
+  const updateActiveAccountStartingBalance = async (value: string) => {
+    if (!supabase || !activeTradingAccount) return
+    const parsed = asNumberOrNull(value)
+    if (value.trim() && parsed === null) {
+      setError('Startkapitaal moet een geldig nummer zijn.')
+      return
+    }
+
+    const { error: updateError } = await supabase
+      .from('trading_accounts')
+      .update({ starting_balance: parsed })
+      .eq('id', activeTradingAccount.id)
+
+    if (updateError) {
+      setError(updateError.message)
+      return
+    }
+
+    setAccounts((prev) =>
+      prev.map((account) =>
+        account.id === activeTradingAccount.id ? { ...account, starting_balance: parsed } : account,
+      ),
+    )
   }
 
   if (!supabase) {
@@ -1126,305 +1382,348 @@ function App() {
   }
 
   const monthTitle = selectedMonth.toLocaleDateString('en-US', { month: 'long', year: 'numeric' })
-  const requiredR = getRequiredRForPositiveExpectancy(tradeMetrics.winrate)
-  const pcpActive = tradeMetrics.totalTrades >= 30 && Number.isFinite(requiredR)
-
+  const displayName = 'Mattis'
   return (
-    <main className="dashboard-shell">
-      <aside className="sidebar">
-        <div className="brand">MH Journal</div>
-        <nav>
-          <button className="nav-item active">Dashboard</button>
-          <button className="nav-item">Trading Journal</button>
-          <button className="nav-item">Trade Analytics</button>
-          <button className="nav-item">Reports</button>
-        </nav>
-        <div className="sidebar-footer">
-          <p>{session.user.email}</p>
-          <button type="button" className="theme-toggle" onClick={toggleTheme}>
+    <main className="dv-shell">
+      <header className="dv-topbar">
+        <div className="dv-brand">
+          <span className="dot blue" />
+          <strong>MH Journal</strong>
+          <span className="dot green" />
+          <small>live</small>
+        </div>
+        <div className="dv-topbar-right">
+          <button className="chip">{displayName}</button>
+          <button type="button" className="theme-toggle chip" onClick={toggleTheme}>
             {theme === 'light' ? 'Dark modus' : 'Light modus'}
           </button>
-          <button onClick={signOut}>Uitloggen</button>
+          <button className="chip" onClick={signOut}>
+            Uitloggen
+          </button>
         </div>
-      </aside>
+      </header>
 
-      <section className="content">
-        <header className="toolbar card">
-          <div className="toolbar-left">
-            <h1>Performance Dashboard</h1>
-            <p>Persoonlijke forex journal met accountability, maandrendement en setup-evaluatie.</p>
+      <section className="dv-main">
+        <div className="dv-headline-row">
+          <div>
+            <h1>Goedemorgen {displayName}</h1>
+            <p>Plan je trade, dan trade je het plan.</p>
           </div>
-          <div className="toolbar-right filters-stack">
-            <div className="filters-grid basic-filters">
-              <input
-                value={symbolFilter}
-                onChange={(e) => setSymbolFilter(e.target.value)}
-                placeholder="Filter symbol (EURUSD, XAUUSD...)"
-              />
-              <select value={setupFilter} onChange={(e) => setSetupFilter(e.target.value)}>
-                <option value="all">Alle setups</option>
-                {setups.map((setup) => (
-                  <option key={setup.id} value={setup.id}>
-                    {setup.name}
-                  </option>
-                ))}
-              </select>
-              <select value={sessionFilter} onChange={(e) => setSessionFilter(e.target.value)}>
-                <option value="all">Alle sessies</option>
-                <option value="asia">Asia</option>
-                <option value="london">London</option>
-                <option value="newyork">New York</option>
-                <option value="other">Other</option>
-              </select>
-            </div>
-            <div className="filters-grid advanced-filters">
-              <select value={tagFilter} onChange={(e) => setTagFilter(e.target.value)}>
-                <option value="all">Alle tags</option>
-                {tags.map((tag) => (
-                  <option key={tag.id} value={tag.name}>
-                    {tag.name}
-                  </option>
-                ))}
-              </select>
-              <select
-                value={planFilter}
-                onChange={(e) => setPlanFilter(e.target.value as 'all' | 'followed' | 'broken')}
-              >
-                <option value="all">Plan all</option>
-                <option value="followed">Plan gevolgd</option>
-                <option value="broken">Plan gebroken</option>
-              </select>
-              <input
-                value={minConfidenceFilter}
-                onChange={(e) => setMinConfidenceFilter(e.target.value)}
-                placeholder="Min confidence"
-              />
-              <select value={emotionFilter} onChange={(e) => setEmotionFilter(e.target.value)}>
-                <option value="all">Emotion all</option>
-                {emotionOptions.map((value) => (
-                  <option key={value} value={value}>
-                    {value}
-                  </option>
-                ))}
-              </select>
-              <select
-                value={marketConditionFilter}
-                onChange={(e) => setMarketConditionFilter(e.target.value)}
-              >
-                <option value="all">Market all</option>
-                {marketConditionOptions.map((value) => (
-                  <option key={value} value={value}>
-                    {value}
-                  </option>
-                ))}
-              </select>
-            </div>
+          <div className="dv-actions">
+            <button className="ghost-button" onClick={() => setManualTradeOpen(true)}>
+              + Trade handmatig
+            </button>
+            <button onClick={() => setSettingsOpen(true)}>+ Nieuw trade plan</button>
           </div>
-        </header>
+        </div>
 
-        <section className="kpi-grid">
-          <article className="kpi card">
-            <p>Net Return</p>
-            <h3>{formatCurrency(tradeMetrics.netReturn)}</h3>
+        {violationStats.violationCount > 0 && (
+          <article className="dv-alert danger">
+            <div>
+              <strong>{formatCurrency(violationStats.fineTotal)} open</strong>
+              <p>
+                {violationStats.violationCount} plan-violations voor {accountability.charityName || 'goed doel'}.
+                Geen plan = boete.
+              </p>
+            </div>
+            <div className="dv-alert-actions">
+              <button className="ghost-button">Bekijk</button>
+              <button onClick={() => accountability.donationUrl && window.open(accountability.donationUrl, '_blank')}>
+                Doneer nu
+              </button>
+            </div>
           </article>
-          <article className="kpi card">
-            <p>Winrate</p>
+        )}
+
+        <section className="dv-kpis">
+          <article className="dv-kpi card">
+            <p>WIN RATE</p>
             <h3>{formatPercent(tradeMetrics.winrate)}</h3>
+            <small>
+              {dashboardMetrics.wins}W / {dashboardMetrics.losses}L
+            </small>
           </article>
-          <article className="kpi card">
-            <p>Expectancy</p>
-            <h3>{formatCurrency(tradeMetrics.expectancy)}</h3>
+          <article className="dv-kpi card">
+            <p>PLAN ADHERENCE</p>
+            <h3>{formatPercent(dashboardMetrics.planAdherence)}</h3>
+            <small>
+              {dashboardMetrics.followed} plans, {tradeMetrics.totalTrades} trades
+            </small>
           </article>
-          <article className="kpi card">
-            <p>Profit Factor</p>
-            <h3>{tradeMetrics.profitFactor.toFixed(2)}</h3>
+          <article className="dv-kpi card">
+            <p>RENDEMENT</p>
+            <h3>{formatPercent(accountSnapshot.returnPct)}</h3>
+            <small>
+              {formatCurrency(accountSnapshot.startingBalance)} startkapitaal
+            </small>
           </article>
-          <article className="kpi card">
-            <p>Avg R Multiple</p>
+          <article className="dv-kpi card">
+            <p>AVG R:R</p>
             <h3>{tradeMetrics.avgR.toFixed(2)}R</h3>
+            <small>PF {tradeMetrics.profitFactor.toFixed(2)}</small>
+          </article>
+          <article className="dv-kpi card">
+            <p>NET P&L</p>
+            <h3>{formatCurrency(tradeMetrics.netReturn)}</h3>
+            <small>{formatCurrency(dashboardMetrics.avgPerTrade)} / trade</small>
+          </article>
+          <article className="dv-kpi card">
+            <p>TRADES</p>
+            <h3>{tradeMetrics.totalTrades}</h3>
+            <small>
+              {tradeMetrics.totalTrades} closed · {dashboardMetrics.openTrades} open
+            </small>
           </article>
         </section>
 
-        <section className="workspace-row">
-          <article className="card workspace-card">
-            <h2>Workspace Setup</h2>
-            <div className="mini-row">
-              <form onSubmit={createAccount} className="inline-form">
-                <input
-                  value={newAccountName}
-                  onChange={(e) => setNewAccountName(e.target.value)}
-                  placeholder="Nieuw account (bv. FTMO 100k)"
-                />
-                <button type="submit">Add account</button>
-              </form>
-              <form onSubmit={createSetup} className="inline-form">
-                <input
-                  value={newSetupName}
-                  onChange={(e) => setNewSetupName(e.target.value)}
-                  placeholder="Nieuwe setup"
-                />
-                <button type="submit">Add setup</button>
-              </form>
-            </div>
-            <p className="muted">
-              Accounts: {accounts.length} | Setups: {setups.length} | Tags: {tags.length}
-            </p>
+        <p className="muted">
+          Accounts: {accounts.length} · Setups: {setups.length} · Tags: {tags.length}
+        </p>
+
+        <article className="dv-warning">
+          Slechts {formatPercent(dashboardMetrics.planAdherence)} van je trades had een pre-trade plan.
+          Discipline issue.
+        </article>
+        {violationStats.violationCount > 0 && (
+          <article className="dv-warning">
+            Je staat {formatCurrency(violationStats.fineTotal)} open aan boetes voor{' '}
+            {accountability.charityName || 'goed doel'}.
           </article>
-          <article className="card workspace-card">
-            <h2>Accountability Settings</h2>
-            <div className="mini-row">
-              <input
-                value={accountability.startingBalance}
-                onChange={(e) =>
-                  setAccountability((prev) => ({ ...prev, startingBalance: e.target.value }))
-                }
-                placeholder="Startkapitaal (bv. 10000)"
-              />
-              <input
-                value={accountability.violationAmount}
-                onChange={(e) =>
-                  setAccountability((prev) => ({ ...prev, violationAmount: e.target.value }))
-                }
-                placeholder="Boete per violation (€)"
-              />
-            </div>
-            <div className="mini-row">
-              <input
-                value={accountability.charityName}
-                onChange={(e) =>
-                  setAccountability((prev) => ({ ...prev, charityName: e.target.value }))
-                }
-                placeholder="Goed doel"
-              />
-              <input
-                type="email"
-                value={accountability.partnerEmail}
-                onChange={(e) =>
-                  setAccountability((prev) => ({ ...prev, partnerEmail: e.target.value }))
-                }
-                placeholder="Partner/coach email"
-              />
-            </div>
-            <input
-              value={accountability.donationUrl}
-              onChange={(e) => setAccountability((prev) => ({ ...prev, donationUrl: e.target.value }))}
-              placeholder="Donatie link"
-            />
-          </article>
-          <article className="card workspace-card">
-            <h2>Violation Tracker</h2>
-            <div className="mini-row violation-grid">
+        )}
+
+        <section className="dv-grid-top">
+          <article className="card dv-pnl-card">
+            <div className="card-head">
               <div>
-                <p className="muted">Open violations</p>
-                <h3>{violationStats.violationCount}</h3>
+                <h2>P&L over tijd</h2>
+                <p>
+                  {tradeMetrics.totalTrades} trades · netto {formatCurrency(tradeMetrics.netReturn)} ·{' '}
+                  {formatPercent(accountSnapshot.returnPct)} rendement
+                </p>
               </div>
-              <div>
-                <p className="muted">Open boete totaal</p>
-                <h3>{formatCurrency(violationStats.fineTotal)}</h3>
+              <div className="segmented">
+                <button
+                  className={pnlPeriod === 'month' ? 'active' : ''}
+                  onClick={() => setPnlPeriod('month')}
+                >
+                  Maand
+                </button>
+                <button
+                  className={pnlPeriod === 'quarter' ? 'active' : ''}
+                  onClick={() => setPnlPeriod('quarter')}
+                >
+                  Kwartaal
+                </button>
+                <button className={pnlPeriod === 'year' ? 'active' : ''} onClick={() => setPnlPeriod('year')}>
+                  Jaar
+                </button>
               </div>
             </div>
-            <p className="muted">
-              {violationStats.violationCount > 0
-                ? `Plan gebroken trades worden geteld tegen ${formatCurrency(
-                    violationStats.finePerViolation,
-                  )} per trade.`
-                : 'Geen open plan-violations.'}
-            </p>
-            {accountability.donationUrl.trim() && (
-              <a href={accountability.donationUrl} target="_blank" rel="noreferrer" className="donation-link">
-                Ga naar donatielink ({accountability.charityName || 'goed doel'})
-              </a>
-            )}
-          </article>
-          <article className="card workspace-card">
-            <h2>Monthly Return %</h2>
-            <div className="monthly-stack">
-              {monthlyReturns.slice(-6).map((month) => {
-                const positive = month.monthReturnPct >= 0
-                const width = `${Math.min(100, Math.max(6, Math.abs(month.monthReturnPct) * 3))}%`
-                return (
-                  <div key={month.month} className="month-row">
-                    <span>{month.month}</span>
-                    <div className="month-bar">
-                      <div className={`month-fill ${positive ? 'pos' : 'neg'}`} style={{ width }} />
-                    </div>
-                    <strong>{formatPercent(month.monthReturnPct)}</strong>
+            <div className="bar-chart">
+              {pnlBars.length === 0 ? (
+                <p className="muted">Nog geen closed trades</p>
+              ) : (
+                pnlBars.map((bar) => (
+                  <div key={bar.label} className="bar-wrap">
+                    <div
+                      className={`bar ${bar.value >= 0 ? 'pos' : 'neg'}`}
+                      style={{ height: `${Math.max(8, Math.min(160, Math.abs(bar.value) * 0.15))}px` }}
+                    />
+                    <small>{bar.label.replace('2026-', '')}</small>
                   </div>
+                ))
+              )}
+            </div>
+          </article>
+
+          <article className="card calendar-card">
+            <div className="calendar-header">
+              <h2>{monthTitle}</h2>
+              <div className="calendar-controls">
+                <button
+                  type="button"
+                  onClick={() =>
+                    setSelectedMonth(
+                      (prev) => new Date(Date.UTC(prev.getUTCFullYear(), prev.getUTCMonth() - 1, 1)),
+                    )
+                  }
+                >
+                  ‹
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setSelectedMonth(
+                      (prev) => new Date(Date.UTC(prev.getUTCFullYear(), prev.getUTCMonth() + 1, 1)),
+                    )
+                  }
+                >
+                  ›
+                </button>
+              </div>
+            </div>
+            <p className="muted">Hoeveel je per dag hebt gedraaid</p>
+            <div className="calendar-grid labels">
+              {['M', 'D', 'W', 'D', 'V', 'Z', 'Z'].map((label) => (
+                <div key={label} className="calendar-label">
+                  {label}
+                </div>
+              ))}
+            </div>
+            <div className="calendar-grid">
+              {calendarCells.map((cell) => {
+                const day = cell.date.getUTCDate()
+                const pnlClass = cell.pnl > 0 ? 'profit' : cell.pnl < 0 ? 'loss' : 'flat'
+                return (
+                  <button
+                    key={cell.key}
+                    type="button"
+                    className={`calendar-cell ${cell.isCurrentMonth ? '' : 'other'} ${pnlClass} ${cell.count > 0 ? 'clickable' : ''}`}
+                    onClick={() => {
+                      if (cell.count > 0) setSelectedDayKey(cell.key)
+                    }}
+                  >
+                    <span className="day">{day}</span>
+                    {cell.count > 0 && <small>{cell.count} trades</small>}
+                  </button>
                 )
               })}
-              {monthlyReturns.length === 0 && <p className="muted">Nog geen maanddata beschikbaar.</p>}
+            </div>
+            <p className="muted">
+              {filteredTrades.length} trades · {formatCurrency(tradeMetrics.netReturn)} deze maand
+            </p>
+          </article>
+        </section>
+
+        <section className="dv-grid-bottom">
+          <article className="card dv-activity">
+            <div className="card-head">
+              <div>
+                <h2>Activiteit</h2>
+                <p>Live trades en plans</p>
+              </div>
+              <div className="segmented">
+                <button className="active">Alles</button>
+                <button>Trades</button>
+                <button>Plans</button>
+              </div>
+            </div>
+            <div className="activity-list">
+              {activityTrades.length === 0 && <p className="muted">Nog geen activiteit.</p>}
+              {activityTrades.map((trade) => (
+                <div key={trade.id} className="activity-row">
+                  <div>
+                    <strong>{trade.symbol}</strong>
+                    <small>
+                      {trade.side.toUpperCase()} · {trade.setups?.name ?? 'geen plan'}
+                    </small>
+                  </div>
+                  <div className="activity-row-right">
+                    <strong className={trade.net_pnl >= 0 ? 'pos' : 'neg'}>{formatCurrency(trade.net_pnl)}</strong>
+                    <button type="button" className="ghost-button row-edit-btn" onClick={() => openEditTrade(trade.id)}>
+                      bewerk
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </article>
+
+          <article className="card dv-symbol">
+            <h2>Per symbool</h2>
+            <p>Win rate + avg R:R over closed trades</p>
+            <div className="symbol-list">
+              {symbolStats.length === 0 && <p className="muted">Nog geen closed trades</p>}
+              {symbolStats.map((row) => (
+                <div key={row.symbol} className="symbol-row">
+                  <div>
+                    <strong>{row.symbol}</strong>
+                    <small>
+                      {row.trades} trades · {formatCurrency(row.netPnl)} · R:R{' '}
+                      {row.avgR === null ? '—' : row.avgR.toFixed(2)}
+                    </small>
+                  </div>
+                  <div className="symbol-rate">
+                    <span>{formatPercent(row.winrate)}</span>
+                    <div className="symbol-bar">
+                      <div style={{ width: `${Math.max(2, Math.min(100, row.winrate))}%` }} />
+                    </div>
+                  </div>
+                </div>
+              ))}
             </div>
           </article>
         </section>
 
-        <section className="main-grid">
-          <article className="card trade-form-card">
-            <h2>Nieuwe Trade</h2>
+        <section className="dv-grid-bottom">
+          <article className="card">
+            <h2>Export</h2>
+            <p>Download je trades als CSV voor verdere analyse</p>
+            <button className="ghost-button">⬇ Download CSV</button>
+          </article>
+        </section>
+
+        {loadingData && <p className="muted">Data laden...</p>}
+        {error && <p className="err global-err">{error}</p>}
+      </section>
+
+      {manualTradeOpen && (
+        <div className="modal-backdrop" onClick={() => setManualTradeOpen(false)}>
+          <article className="modal-card" onClick={(e) => e.stopPropagation()}>
+            <h2>Trade handmatig toevoegen</h2>
+            <p>Voor trades buiten je MT5 om (TradingView paper, prop firm, etc.)</p>
             <form onSubmit={createTrade} className="trade-form">
-              <div className="two-col">
-                <select
-                  value={form.accountId}
-                  onChange={(e) => setForm((prev) => ({ ...prev, accountId: e.target.value }))}
-                >
-                  <option value="">Geen account</option>
-                  {accounts.map((account) => (
-                    <option key={account.id} value={account.id}>
-                      {account.name}
-                    </option>
-                  ))}
-                </select>
-
-                <select
-                  value={form.setupId}
-                  onChange={(e) => setForm((prev) => ({ ...prev, setupId: e.target.value }))}
-                >
-                  <option value="">Geen setup</option>
-                  {setups.map((setup) => (
-                    <option key={setup.id} value={setup.id}>
-                      {setup.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
               <div className="two-col">
                 <input
                   value={form.symbol}
                   onChange={(e) => setForm((prev) => ({ ...prev, symbol: e.target.value }))}
-                  placeholder="Symbol (EURUSD, XAUUSD)"
+                  placeholder="EURUSD"
                   required
                 />
                 <select
                   value={form.side}
                   onChange={(e) => setForm((prev) => ({ ...prev, side: e.target.value as 'long' | 'short' }))}
                 >
-                  <option value="long">Long</option>
-                  <option value="short">Short</option>
+                  <option value="long">Long (buy)</option>
+                  <option value="short">Short (sell)</option>
                 </select>
               </div>
-
               <div className="two-col">
-                <select
-                  value={form.session}
-                  onChange={(e) =>
-                    setForm((prev) => ({
-                      ...prev,
-                      session: e.target.value as 'asia' | 'london' | 'newyork' | 'other',
-                    }))
-                  }
-                >
-                  <option value="asia">Asia</option>
-                  <option value="london">London</option>
-                  <option value="newyork">New York</option>
-                  <option value="other">Other</option>
-                </select>
                 <input
-                  value={form.confidence}
-                  onChange={(e) => setForm((prev) => ({ ...prev, confidence: e.target.value }))}
-                  placeholder="Confidence 1-100"
+                  value={form.positionSize}
+                  onChange={(e) => setForm((prev) => ({ ...prev, positionSize: e.target.value }))}
+                  placeholder="Volume (lots)"
+                />
+                <input
+                  value={form.tagsCsv}
+                  onChange={(e) => setForm((prev) => ({ ...prev, tagsCsv: e.target.value }))}
+                  placeholder="Ticket / referentie"
                 />
               </div>
-
+              <div className="two-col">
+                <input
+                  value={form.entryPrice}
+                  onChange={(e) => setForm((prev) => ({ ...prev, entryPrice: e.target.value }))}
+                  placeholder="Entry prijs"
+                />
+                <input
+                  value={form.exitPrice}
+                  onChange={(e) => setForm((prev) => ({ ...prev, exitPrice: e.target.value }))}
+                  placeholder="Exit prijs"
+                />
+              </div>
+              <div className="two-col">
+                <input
+                  value={form.stopLoss}
+                  onChange={(e) => setForm((prev) => ({ ...prev, stopLoss: e.target.value }))}
+                  placeholder="Stop loss"
+                />
+                <input
+                  value={form.takeProfit}
+                  onChange={(e) => setForm((prev) => ({ ...prev, takeProfit: e.target.value }))}
+                  placeholder="Take profit"
+                />
+              </div>
               <div className="two-col">
                 <input
                   type="datetime-local"
@@ -1437,399 +1736,309 @@ function App() {
                   onChange={(e) => setForm((prev) => ({ ...prev, closedAt: e.target.value }))}
                 />
               </div>
-
-              <div className="four-col">
+              <div className="two-col">
                 <input
-                  value={form.entryPrice}
-                  onChange={(e) => setForm((prev) => ({ ...prev, entryPrice: e.target.value }))}
-                  placeholder="Entry"
-                />
-                <input
-                  value={form.exitPrice}
-                  onChange={(e) => setForm((prev) => ({ ...prev, exitPrice: e.target.value }))}
-                  placeholder="Exit"
-                />
-                <input
-                  value={form.stopLoss}
-                  onChange={(e) => setForm((prev) => ({ ...prev, stopLoss: e.target.value }))}
-                  placeholder="SL"
-                />
-                <input
-                  value={form.takeProfit}
-                  onChange={(e) => setForm((prev) => ({ ...prev, takeProfit: e.target.value }))}
-                  placeholder="TP"
-                />
-              </div>
-
-              <div className="four-col">
-                <input
-                  value={form.riskAmount}
-                  onChange={(e) => setForm((prev) => ({ ...prev, riskAmount: e.target.value }))}
-                  placeholder="Risk $"
-                />
-                <input
-                  value={form.positionSize}
-                  onChange={(e) => setForm((prev) => ({ ...prev, positionSize: e.target.value }))}
-                  placeholder="Position size"
+                  value={form.netPnl}
+                  onChange={(e) => setForm((prev) => ({ ...prev, netPnl: e.target.value }))}
+                  placeholder="P&L (bv. 183.50)"
+                  required
                 />
                 <input
                   value={form.fees}
                   onChange={(e) => setForm((prev) => ({ ...prev, fees: e.target.value }))}
-                  placeholder="Fees"
-                />
-                <input
-                  value={form.swap}
-                  onChange={(e) => setForm((prev) => ({ ...prev, swap: e.target.value }))}
-                  placeholder="Swap"
+                  placeholder="Commissie"
                 />
               </div>
-
-              <input
-                value={form.netPnl}
-                onChange={(e) => setForm((prev) => ({ ...prev, netPnl: e.target.value }))}
-                placeholder="Net PnL (verplicht, bv. 184.55 of -79.10)"
-                required
-              />
-
-              <input
-                value={form.tagsCsv}
-                onChange={(e) => setForm((prev) => ({ ...prev, tagsCsv: e.target.value }))}
-                placeholder="Tags (comma separated): A+, news, overtrade"
-              />
-
-              <div className="two-col">
-                <input
-                  value={form.marketCondition}
-                  onChange={(e) => setForm((prev) => ({ ...prev, marketCondition: e.target.value }))}
-                  placeholder="Custom stat: market_condition"
-                />
-                <input
-                  value={form.emotion}
-                  onChange={(e) => setForm((prev) => ({ ...prev, emotion: e.target.value }))}
-                  placeholder="Custom stat: emotion"
-                />
-              </div>
-
-              <div className="two-col">
-                <textarea
-                  value={form.biasPlan}
-                  onChange={(e) => setForm((prev) => ({ ...prev, biasPlan: e.target.value }))}
-                  rows={2}
-                  placeholder="Bias plan (waarom deze richting?)"
-                />
-                <textarea
-                  value={form.entryPlan}
-                  onChange={(e) => setForm((prev) => ({ ...prev, entryPlan: e.target.value }))}
-                  rows={2}
-                  placeholder="Entry plan"
-                />
-              </div>
-
-              <div className="two-col">
-                <textarea
-                  value={form.exitPlan}
-                  onChange={(e) => setForm((prev) => ({ ...prev, exitPlan: e.target.value }))}
-                  rows={2}
-                  placeholder="Exit plan"
-                />
-                <textarea
-                  value={form.focusReview}
-                  onChange={(e) => setForm((prev) => ({ ...prev, focusReview: e.target.value }))}
-                  rows={2}
-                  placeholder="Focus/gevoel review"
-                />
-              </div>
-
-              <input
-                value={form.chartScreenshotUrl}
-                onChange={(e) => setForm((prev) => ({ ...prev, chartScreenshotUrl: e.target.value }))}
-                placeholder="Chart screenshot URL"
-              />
-
-              <div className="three-col">
-                <select
-                  value={form.entryRating}
-                  onChange={(e) =>
-                    setForm((prev) => ({ ...prev, entryRating: e.target.value as '-1' | '0' | '1' }))
-                  }
-                >
-                  <option value="-1">Entry rating: negative</option>
-                  <option value="0">Entry rating: neutral</option>
-                  <option value="1">Entry rating: positive</option>
-                </select>
-                <select
-                  value={form.managementRating}
-                  onChange={(e) =>
-                    setForm((prev) => ({
-                      ...prev,
-                      managementRating: e.target.value as '-1' | '0' | '1',
-                    }))
-                  }
-                >
-                  <option value="-1">Mgmt rating: negative</option>
-                  <option value="0">Mgmt rating: neutral</option>
-                  <option value="1">Mgmt rating: positive</option>
-                </select>
-                <select
-                  value={form.exitRating}
-                  onChange={(e) =>
-                    setForm((prev) => ({ ...prev, exitRating: e.target.value as '-1' | '0' | '1' }))
-                  }
-                >
-                  <option value="-1">Exit rating: negative</option>
-                  <option value="0">Exit rating: neutral</option>
-                  <option value="1">Exit rating: positive</option>
-                </select>
-              </div>
-
-              <textarea
-                value={form.entryComment}
-                onChange={(e) => setForm((prev) => ({ ...prev, entryComment: e.target.value }))}
-                rows={2}
-                placeholder="Entry comment"
-              />
-              <textarea
-                value={form.managementComment}
-                onChange={(e) => setForm((prev) => ({ ...prev, managementComment: e.target.value }))}
-                rows={2}
-                placeholder="Management comment"
-              />
-              <textarea
-                value={form.exitComment}
-                onChange={(e) => setForm((prev) => ({ ...prev, exitComment: e.target.value }))}
-                rows={2}
-                placeholder="Exit comment"
-              />
-
               <textarea
                 value={form.note}
                 onChange={(e) => setForm((prev) => ({ ...prev, note: e.target.value }))}
-                rows={4}
-                placeholder="Trade note / psychologie / execution review"
+                rows={3}
+                placeholder="Notitie - wat ging er goed/fout?"
               />
-
-              <label className="checkbox-row">
-                <input
-                  type="checkbox"
-                  checked={form.planFollowed}
-                  onChange={(e) => setForm((prev) => ({ ...prev, planFollowed: e.target.checked }))}
-                />
-                Plan gevolgd
-              </label>
-
-              <button type="submit" disabled={submittingTrade || loadingData}>
-                {submittingTrade ? 'Trade opslaan...' : 'Trade opslaan'}
-              </button>
-            </form>
-          </article>
-
-          <article className="card calendar-card">
-            <div className="calendar-header">
-              <h2>Profit Calendar</h2>
-              <div className="calendar-controls">
-                <button
-                  type="button"
-                  onClick={() =>
-                    setSelectedMonth(
-                      (prev) => new Date(Date.UTC(prev.getUTCFullYear(), prev.getUTCMonth() - 1, 1)),
-                    )
-                  }
-                >
-                  ←
+              <div className="modal-actions">
+                <button type="button" className="ghost-button" onClick={() => setManualTradeOpen(false)}>
+                  Annuleren
                 </button>
-                <strong>{monthTitle}</strong>
-                <button
-                  type="button"
-                  onClick={() =>
-                    setSelectedMonth(
-                      (prev) => new Date(Date.UTC(prev.getUTCFullYear(), prev.getUTCMonth() + 1, 1)),
-                    )
-                  }
-                >
-                  →
+                <button type="submit" disabled={submittingTrade}>
+                  {submittingTrade ? 'Opslaan...' : 'Trade opslaan'}
                 </button>
               </div>
-            </div>
+            </form>
+          </article>
+        </div>
+      )}
 
-            <div className="calendar-grid labels">
-              {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((label) => (
-                <div key={label} className="calendar-label">
-                  {label}
-                </div>
-              ))}
-            </div>
-            <div className="calendar-grid">
-              {calendarCells.map((cell) => {
-                const day = cell.date.getUTCDate()
-                const pnlClass = cell.pnl > 0 ? 'profit' : cell.pnl < 0 ? 'loss' : 'flat'
+      {selectedDayKey && (
+        <div className="modal-backdrop" onClick={() => setSelectedDayKey(null)}>
+          <article className="modal-card day-detail-modal" onClick={(e) => e.stopPropagation()}>
+            <h2>{formatDayModalTitle(selectedDayKey)}</h2>
+            <p>
+              {selectedDayTrades.length} trades · {formatCurrency(selectedDayPnl)} ·{' '}
+              {formatPercent(selectedDayReturnPct)}
+            </p>
+            <div className="day-trade-list">
+              {selectedDayTrades.map((trade) => {
+                const ticketRef =
+                  trade.custom_stats.ticket_reference ?? trade.custom_stats.ticket_ref ?? `#${trade.id.slice(0, 8)}`
                 return (
-                  <div key={cell.key} className={`calendar-cell ${cell.isCurrentMonth ? '' : 'other'} ${pnlClass}`}>
-                    <span className="day">{day}</span>
-                    {cell.count > 0 ? (
-                      <>
-                        <strong>{formatCurrency(cell.pnl)}</strong>
-                        <small>{cell.count} trade(s)</small>
-                      </>
-                    ) : (
-                      <small>No Trades</small>
-                    )}
-                  </div>
+                  <button
+                    key={trade.id}
+                    type="button"
+                    className="day-trade-row"
+                    onClick={() => {
+                      setSelectedDayKey(null)
+                      openEditTrade(trade.id)
+                    }}
+                  >
+                    <div className="day-trade-left">
+                      <strong>{trade.symbol}</strong>
+                      <small>
+                        {(trade.position_size ?? 0).toString().replace('.', ',')} lots · {ticketRef} · MT5
+                      </small>
+                    </div>
+                    <div className="day-trade-right">
+                      <strong className={trade.net_pnl >= 0 ? 'pos' : 'neg'}>{formatCurrency(trade.net_pnl)}</strong>
+                      <small>⟲ bewerk</small>
+                    </div>
+                  </button>
                 )
               })}
             </div>
+            <div className="modal-actions">
+              <button type="button" className="ghost-button" onClick={() => setSelectedDayKey(null)}>
+                Sluiten
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedDayKey(null)
+                  setManualTradeOpen(true)
+                }}
+              >
+                + Trade toevoegen
+              </button>
+            </div>
           </article>
+        </div>
+      )}
 
-          <article className="card evaluation-card">
-            <h2>Evaluation</h2>
-            <ul>
-              <li>
-                <span>Total Number of Trades</span>
-                <strong>{tradeMetrics.totalTrades}</strong>
-              </li>
-              <li>
-                <span>Avg. Profit per Trading Day</span>
-                <strong>{formatCurrency(tradeMetrics.avgProfitPerDay)}</strong>
-              </li>
-              <li>
-                <span>Biggest Winner</span>
-                <strong>{formatCurrency(tradeMetrics.biggestWinner)}</strong>
-              </li>
-              <li>
-                <span>Biggest Loser</span>
-                <strong>{formatCurrency(tradeMetrics.biggestLoser)}</strong>
-              </li>
-              <li>
-                <span>Total Fees</span>
-                <strong>{formatCurrency(tradeMetrics.totalFees)}</strong>
-              </li>
-              <li>
-                <span>Avg. Hold Time</span>
-                <strong>{tradeMetrics.avgHoldHours.toFixed(1)}h</strong>
-              </li>
-              <li>
-                <span>Winning / Losing Days</span>
-                <strong>
-                  {tradeMetrics.winningDays} / {tradeMetrics.losingDays}
-                </strong>
-              </li>
-              <li>
-                <span>PCP/PCR Threshold</span>
-                <strong>{pcpActive ? `${requiredR.toFixed(2)}R` : 'Need 30 trades'}</strong>
-              </li>
-            </ul>
+      {editingTrade && (
+        <div className="modal-backdrop" onClick={closeEditTrade}>
+          <article className="modal-card edit-trade-modal" onClick={(e) => e.stopPropagation()}>
+            <h2>Trade bewerken — {editingTrade.symbol}</h2>
+            <p>
+              Pas details aan, voeg een chart-screenshot of notitie toe. MT5-trades worden bij volgende sync deels
+              overschreven.
+            </p>
+            <form onSubmit={saveEditedTrade} className="trade-form">
+              <div className="two-col">
+                <input
+                  value={editingTradeForm.symbol}
+                  onChange={(e) => setEditingTradeForm((prev) => ({ ...prev, symbol: e.target.value }))}
+                  placeholder="Symbol"
+                  required
+                />
+                <select
+                  value={editingTradeForm.side}
+                  onChange={(e) =>
+                    setEditingTradeForm((prev) => ({ ...prev, side: e.target.value as 'long' | 'short' }))
+                  }
+                >
+                  <option value="long">↑ Long (buy)</option>
+                  <option value="short">↓ Short (sell)</option>
+                </select>
+              </div>
+              <div className="two-col">
+                <input
+                  value={editingTradeForm.positionSize}
+                  onChange={(e) => setEditingTradeForm((prev) => ({ ...prev, positionSize: e.target.value }))}
+                  placeholder="Volume (lots)"
+                />
+                <input
+                  value={editingTradeForm.ticketReference}
+                  onChange={(e) => setEditingTradeForm((prev) => ({ ...prev, ticketReference: e.target.value }))}
+                  placeholder="Ticket / referentie"
+                />
+              </div>
+              <div className="two-col">
+                <input
+                  value={editingTradeForm.entryPrice}
+                  onChange={(e) => setEditingTradeForm((prev) => ({ ...prev, entryPrice: e.target.value }))}
+                  placeholder="Entry prijs"
+                />
+                <input
+                  value={editingTradeForm.exitPrice}
+                  onChange={(e) => setEditingTradeForm((prev) => ({ ...prev, exitPrice: e.target.value }))}
+                  placeholder="Exit prijs"
+                />
+              </div>
+              <div className="two-col">
+                <input
+                  value={editingTradeForm.stopLoss}
+                  onChange={(e) => setEditingTradeForm((prev) => ({ ...prev, stopLoss: e.target.value }))}
+                  placeholder="Stop loss"
+                />
+                <input
+                  value={editingTradeForm.takeProfit}
+                  onChange={(e) => setEditingTradeForm((prev) => ({ ...prev, takeProfit: e.target.value }))}
+                  placeholder="Take profit"
+                />
+              </div>
+              <div className="two-col">
+                <input
+                  type="datetime-local"
+                  value={editingTradeForm.openedAt}
+                  onChange={(e) => setEditingTradeForm((prev) => ({ ...prev, openedAt: e.target.value }))}
+                />
+                <input
+                  type="datetime-local"
+                  value={editingTradeForm.closedAt}
+                  onChange={(e) => setEditingTradeForm((prev) => ({ ...prev, closedAt: e.target.value }))}
+                />
+              </div>
+              <div className="two-col">
+                <input
+                  value={editingTradeForm.netPnl}
+                  onChange={(e) => setEditingTradeForm((prev) => ({ ...prev, netPnl: e.target.value }))}
+                  placeholder="P&L"
+                  required
+                />
+                <input
+                  value={editingTradeForm.fees}
+                  onChange={(e) => setEditingTradeForm((prev) => ({ ...prev, fees: e.target.value }))}
+                  placeholder="Commissie"
+                />
+              </div>
+              <input
+                value={editingTradeForm.chartScreenshotUrl}
+                onChange={(e) =>
+                  setEditingTradeForm((prev) => ({ ...prev, chartScreenshotUrl: e.target.value }))
+                }
+                placeholder="Chart screenshot (URL)"
+              />
+              <textarea
+                value={editingTradeForm.note}
+                onChange={(e) => setEditingTradeForm((prev) => ({ ...prev, note: e.target.value }))}
+                rows={3}
+                placeholder="Notitie"
+              />
+              <div className="modal-actions spread">
+                <button
+                  type="button"
+                  className="ghost-button danger-outline"
+                  disabled={deletingTradeId === editingTrade.id}
+                  onClick={() => deleteTrade(editingTrade.id)}
+                >
+                  {deletingTradeId === editingTrade.id ? 'Verwijderen...' : 'Verwijder'}
+                </button>
+                <div className="modal-actions">
+                  <button type="button" className="ghost-button" onClick={closeEditTrade}>
+                    Annuleren
+                  </button>
+                  <button type="submit" disabled={savingEditTrade}>
+                    {savingEditTrade ? 'Opslaan...' : 'Trade opslaan'}
+                  </button>
+                </div>
+              </div>
+            </form>
           </article>
-        </section>
+        </div>
+      )}
 
-        <section className="card table-card">
-          <h2>Performance by Symbol</h2>
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Symbol</th>
-                  <th>Trades</th>
-                  <th>Winrate</th>
-                  <th>Net P&L</th>
-                  <th>Avg R</th>
-                </tr>
-              </thead>
-              <tbody>
-                {symbolStats.map((row) => (
-                  <tr key={row.symbol}>
-                    <td>{row.symbol}</td>
-                    <td>{row.trades}</td>
-                    <td>{formatPercent(row.winrate)}</td>
-                    <td className={row.netPnl >= 0 ? 'pos' : 'neg'}>{formatCurrency(row.netPnl)}</td>
-                    <td>{row.avgR === null ? '-' : `${row.avgR.toFixed(2)}R`}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          {symbolStats.length === 0 && <p className="muted">Geen trades voor symbol-analyse.</p>}
-        </section>
-
-        <section className="card table-card">
-          <h2>Trades</h2>
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Time</th>
-                  <th>Symbol</th>
-                  <th>Side</th>
-                  <th>Setup</th>
-                  <th>Session</th>
-                  <th>P&L</th>
-                  <th>R</th>
-                  <th>PCP</th>
-                  <th>PCR</th>
-                  <th>Tilt</th>
-                  <th>Tags</th>
-                  <th>Plan</th>
-                  <th>Chart</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filteredTrades.map((trade) => {
-                  const plannedR = getPlannedR(trade)
-                  const realizedR = getRealizedR(trade)
-                  const tiltScore = getTiltScore(trade)
-                  const pcpState =
-                    !pcpActive || plannedR === null
-                      ? 'na'
-                      : plannedR > requiredR
-                        ? 'green'
-                        : 'red'
-                  const pcrState =
-                    !pcpActive || realizedR === null
-                      ? 'na'
-                      : realizedR > requiredR
-                        ? 'green'
-                        : 'red'
-
-                  return (
-                    <tr key={trade.id}>
-                      <td>{new Date(trade.opened_at).toLocaleString()}</td>
-                      <td>{trade.symbol}</td>
-                      <td>{trade.side.toUpperCase()}</td>
-                      <td>{trade.setups?.name ?? '-'}</td>
-                      <td>{trade.session}</td>
-                      <td className={trade.net_pnl >= 0 ? 'pos' : 'neg'}>{formatCurrency(trade.net_pnl)}</td>
-                      <td>{trade.r_multiple !== null ? `${trade.r_multiple.toFixed(2)}R` : '-'}</td>
-                      <td>
-                        <span className={`traffic ${pcpState}`}>{pcpState === 'na' ? '·' : ''}</span>
-                      </td>
-                      <td>
-                        <span className={`traffic ${pcrState}`}>{pcrState === 'na' ? '·' : ''}</span>
-                      </td>
-                      <td>
-                        <div className="tilt-wrap">
-                          <div className="tilt-bar" style={{ width: `${tiltScore}%` }} />
-                        </div>
-                      </td>
-                      <td>{(tradeTags[trade.id] ?? []).join(', ') || '-'}</td>
-                      <td>{trade.plan_followed ? 'Yes' : 'No'}</td>
-                      <td>
-                        {trade.custom_stats.chart_screenshot_url ? (
-                          <a href={trade.custom_stats.chart_screenshot_url} target="_blank" rel="noreferrer">
-                            Open
-                          </a>
-                        ) : (
-                          '-'
-                        )}
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
-          {loadingData && <p className="muted">Data laden...</p>}
-        </section>
-
-        {error && <p className="err global-err">{error}</p>}
-      </section>
+      {settingsOpen && (
+        <div className="modal-backdrop" onClick={() => setSettingsOpen(false)}>
+          <article className="modal-card settings-modal" onClick={(e) => e.stopPropagation()}>
+            <h2>Instellingen</h2>
+            <p>MT5 koppeling, kapitaal en accountability</p>
+            <h3>MT5 Koppeling</h3>
+            <div className="two-col">
+              <input
+                value={mt5Sync.apiKey}
+                onChange={(e) => setMt5Sync((prev) => ({ ...prev, apiKey: e.target.value }))}
+                placeholder="API key (in EA invoeren)"
+              />
+              <input
+                value={mt5Sync.accountLabel}
+                onChange={(e) => setMt5Sync((prev) => ({ ...prev, accountLabel: e.target.value }))}
+                placeholder="MT5 Login"
+              />
+            </div>
+            <div className="two-col">
+              <input
+                value={mt5Sync.broker}
+                onChange={(e) => setMt5Sync((prev) => ({ ...prev, broker: e.target.value }))}
+                placeholder="Broker"
+              />
+              <input
+                value={mt5Sync.server}
+                onChange={(e) => setMt5Sync((prev) => ({ ...prev, server: e.target.value }))}
+                placeholder="Server"
+              />
+            </div>
+            <h3>Kapitaal & Rendement</h3>
+            <div className="two-col">
+              <input
+                key={activeTradingAccount?.id ?? 'no-account'}
+                defaultValue={
+                  activeTradingAccount?.starting_balance !== null &&
+                  activeTradingAccount?.starting_balance !== undefined
+                    ? String(activeTradingAccount.starting_balance)
+                    : ''
+                }
+                onBlur={(e) => {
+                  void updateActiveAccountStartingBalance(e.target.value)
+                }}
+                placeholder="Startkapitaal"
+                disabled={!activeTradingAccount}
+              />
+              <select value={accountCurrency} onChange={(e) => setAccountCurrency(e.target.value)}>
+                <option value="EUR">€ EUR</option>
+                <option value="USD">$ USD</option>
+              </select>
+            </div>
+            <h3>Accountability</h3>
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={mt5Sync.autoSyncEnabled}
+                onChange={(e) => setMt5Sync((prev) => ({ ...prev, autoSyncEnabled: e.target.checked }))}
+              />
+              Boete bij plan-violation
+            </label>
+            <div className="two-col">
+              <input
+                value={accountability.violationAmount}
+                onChange={(e) =>
+                  setAccountability((prev) => ({ ...prev, violationAmount: e.target.value }))
+                }
+                placeholder="Bedrag per violation"
+              />
+              <input
+                value={accountability.charityName}
+                onChange={(e) =>
+                  setAccountability((prev) => ({ ...prev, charityName: e.target.value }))
+                }
+                placeholder="Goed doel"
+              />
+            </div>
+            <input
+              value={accountability.donationUrl}
+              onChange={(e) => setAccountability((prev) => ({ ...prev, donationUrl: e.target.value }))}
+              placeholder="Donatie link (optioneel)"
+            />
+            <input
+              value={accountability.partnerEmail}
+              onChange={(e) => setAccountability((prev) => ({ ...prev, partnerEmail: e.target.value }))}
+              placeholder="Partner email (optioneel)"
+            />
+            <div className="modal-actions">
+              <button type="button" className="ghost-button" onClick={() => setSettingsOpen(false)}>
+                Sluiten
+              </button>
+            </div>
+          </article>
+        </div>
+      )}
     </main>
   )
 }
