@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import type { Session } from '@supabase/supabase-js'
 import { supabase, supabaseConfigError } from './supabaseClient'
@@ -111,11 +111,14 @@ type ThemeMode = 'light' | 'dark'
 type PnlPeriod = 'month' | 'quarter' | 'year'
 
 type Mt5SyncSettings = {
+  id: string | null
+  tradingAccountId: string | null
   accountLabel: string
   apiKey: string
   autoSyncEnabled: boolean
   broker: string
   server: string
+  lastSyncAt: string | null
 }
 
 type EditTradeForm = {
@@ -145,11 +148,14 @@ const DEFAULT_ACCOUNTABILITY_SETTINGS: AccountabilitySettings = {
 }
 
 const DEFAULT_MT5_SYNC_SETTINGS: Mt5SyncSettings = {
+  id: null,
+  tradingAccountId: null,
   accountLabel: 'Main MT5',
   apiKey: '',
-  autoSyncEnabled: false,
+  autoSyncEnabled: true,
   broker: '',
   server: '',
+  lastSyncAt: null,
 }
 
 const createDefaultTradeForm = (accountId = '', setupId = ''): TradeForm => ({
@@ -192,6 +198,19 @@ const asNumberOrNull = (value: string): number | null => {
   if (!value.trim()) return null
   const parsed = Number(value)
   return Number.isFinite(parsed) ? parsed : null
+}
+
+const generateMt5ApiKey = () => {
+  const bytes = new Uint8Array(24)
+  if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+    crypto.getRandomValues(bytes)
+  } else {
+    for (let i = 0; i < bytes.length; i += 1) {
+      bytes[i] = Math.floor(Math.random() * 256)
+    }
+  }
+  const token = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
+  return `mhj_${token}`
 }
 
 const formatCurrency = (value: number) =>
@@ -357,6 +376,8 @@ function App() {
   const [pnlPeriod, setPnlPeriod] = useState<PnlPeriod>('month')
   const [manualTradeOpen, setManualTradeOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [savingMt5Sync, setSavingMt5Sync] = useState(false)
+  const [profileMenuOpen, setProfileMenuOpen] = useState(false)
   const [selectedDayKey, setSelectedDayKey] = useState<string | null>(null)
   const [editingTradeId, setEditingTradeId] = useState<string | null>(null)
   const [editingTradeForm, setEditingTradeForm] = useState<EditTradeForm>(createEmptyEditTradeForm())
@@ -372,6 +393,7 @@ function App() {
   const emotionFilter: string = 'all'
   const marketConditionFilter: string = 'all'
   const [accountCurrency, setAccountCurrency] = useState('EUR')
+  const profileMenuRef = useRef<HTMLDivElement | null>(null)
 
   const [form, setForm] = useState<TradeForm>(createDefaultTradeForm())
   const [accountability, setAccountability] = useState<AccountabilitySettings>(() => {
@@ -391,23 +413,7 @@ function App() {
       return DEFAULT_ACCOUNTABILITY_SETTINGS
     }
   })
-  const [mt5Sync, setMt5Sync] = useState<Mt5SyncSettings>(() => {
-    if (typeof window === 'undefined') return DEFAULT_MT5_SYNC_SETTINGS
-    try {
-      const raw = window.localStorage.getItem('mh_journal_mt5_sync')
-      if (!raw) return DEFAULT_MT5_SYNC_SETTINGS
-      const parsed = JSON.parse(raw) as Partial<Mt5SyncSettings>
-      return {
-        accountLabel: parsed.accountLabel ?? DEFAULT_MT5_SYNC_SETTINGS.accountLabel,
-        apiKey: parsed.apiKey ?? DEFAULT_MT5_SYNC_SETTINGS.apiKey,
-        autoSyncEnabled: parsed.autoSyncEnabled ?? DEFAULT_MT5_SYNC_SETTINGS.autoSyncEnabled,
-        broker: parsed.broker ?? DEFAULT_MT5_SYNC_SETTINGS.broker,
-        server: parsed.server ?? DEFAULT_MT5_SYNC_SETTINGS.server,
-      }
-    } catch {
-      return DEFAULT_MT5_SYNC_SETTINGS
-    }
-  })
+  const [mt5Sync, setMt5Sync] = useState<Mt5SyncSettings>(DEFAULT_MT5_SYNC_SETTINGS)
 
   useEffect(() => {
     if (typeof window === 'undefined') return
@@ -416,14 +422,52 @@ function App() {
 
   useEffect(() => {
     if (typeof window === 'undefined') return
-    window.localStorage.setItem('mh_journal_mt5_sync', JSON.stringify(mt5Sync))
-  }, [mt5Sync])
-
-  useEffect(() => {
-    if (typeof window === 'undefined') return
     window.localStorage.setItem('mh_journal_theme', theme)
     document.documentElement.setAttribute('data-theme', theme)
   }, [theme])
+
+  const mt5Endpoint = useMemo(() => {
+    const baseUrl = import.meta.env.VITE_SUPABASE_URL?.trim()
+    if (!baseUrl) return ''
+    return `${baseUrl.replace(/\/$/, '')}/functions/v1/mt5-trade`
+  }, [])
+
+  useEffect(() => {
+    if (!profileMenuOpen) return
+
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as Node
+      if (!profileMenuRef.current?.contains(target)) {
+        setProfileMenuOpen(false)
+      }
+    }
+
+    const onEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setProfileMenuOpen(false)
+    }
+
+    window.addEventListener('pointerdown', onPointerDown)
+    window.addEventListener('keydown', onEscape)
+
+    return () => {
+      window.removeEventListener('pointerdown', onPointerDown)
+      window.removeEventListener('keydown', onEscape)
+    }
+  }, [profileMenuOpen])
+
+  function syncDisplayNamesFromSession(currentSession: Session | null) {
+    if (!currentSession) return
+    const metadataName = (currentSession.user.user_metadata?.display_name as string | undefined)?.trim()
+    if (metadataName) {
+      setProfileDisplayName(metadataName)
+      setSignupDisplayName(metadataName)
+      return
+    }
+    const emailName = currentSession.user.email?.split('@')[0]
+    if (emailName) {
+      setProfileDisplayName(emailName)
+    }
+  }
 
   useEffect(() => {
     const client = supabase
@@ -432,6 +476,7 @@ function App() {
     const bootstrap = async () => {
       const { data, error: sessionError } = await client.auth.getSession()
       if (sessionError) setError(sessionError.message)
+      syncDisplayNamesFromSession(data.session)
       setSession(data.session)
       setBooting(false)
     }
@@ -441,12 +486,12 @@ function App() {
     const {
       data: { subscription },
     } = client.auth.onAuthStateChange((_event, currentSession) => {
+      syncDisplayNamesFromSession(currentSession)
       setSession(currentSession)
     })
 
     return () => subscription.unsubscribe()
   }, [])
-
   useEffect(() => {
     const client = supabase
     if (!client || !session) return
@@ -456,7 +501,8 @@ function App() {
       setError('')
 
       const fetchAll = async () => {
-        const [accountsResult, setupsResult, tagsResult, tradesResult, tradeTagsResult] = await Promise.all([
+        const [accountsResult, setupsResult, tagsResult, tradesResult, tradeTagsResult, mt5ConnectionResult] =
+          await Promise.all([
           client
             .from('trading_accounts')
             .select('id, name, broker, account_currency, starting_balance')
@@ -470,6 +516,10 @@ function App() {
             )
             .order('opened_at', { ascending: false }),
           client.from('trade_tags').select('trade_id, tags(name, color)'),
+          client
+            .from('mt5_connections')
+            .select('id, trading_account_id, api_key, mt5_login, broker, server, sync_enabled, last_sync_at')
+            .maybeSingle(),
         ])
 
         return {
@@ -478,6 +528,7 @@ function App() {
           tagsResult,
           tradesResult,
           tradeTagsResult,
+          mt5ConnectionResult,
         }
       }
 
@@ -489,6 +540,7 @@ function App() {
         firstPass.tagsResult.error,
         firstPass.tradesResult.error,
         firstPass.tradeTagsResult.error,
+        firstPass.mt5ConnectionResult.error,
       ].filter(Boolean)
 
       if (firstErrors.length > 0) {
@@ -523,6 +575,7 @@ function App() {
         secondPass.tagsResult.error,
         secondPass.tradesResult.error,
         secondPass.tradeTagsResult.error,
+        secondPass.mt5ConnectionResult.error,
       ].filter(Boolean)
 
       if (secondErrors.length > 0) {
@@ -536,6 +589,18 @@ function App() {
       const loadedTags = (secondPass.tagsResult.data ?? []) as Tag[]
       const loadedTrades = ((secondPass.tradesResult.data ?? []) as RawTrade[]).map(normalizeTrade)
       const loadedTradeTagRows = (secondPass.tradeTagsResult.data ?? []) as unknown as TradeTagLink[]
+      const mt5Row = secondPass.mt5ConnectionResult.data as
+        | {
+            id: string
+            trading_account_id: string | null
+            api_key: string
+            mt5_login: string | null
+            broker: string | null
+            server: string | null
+            sync_enabled: boolean
+            last_sync_at: string | null
+          }
+        | null
 
       const tagMap: Record<string, string[]> = {}
       for (const row of loadedTradeTagRows) {
@@ -549,6 +614,16 @@ function App() {
       setTrades(loadedTrades)
       setTradeTags(tagMap)
       setAccountCurrency(loadedAccounts[0]?.account_currency ?? 'EUR')
+      setMt5Sync({
+        id: mt5Row?.id ?? null,
+        tradingAccountId: mt5Row?.trading_account_id ?? loadedAccounts[0]?.id ?? null,
+        accountLabel: mt5Row?.mt5_login ?? loadedAccounts[0]?.name ?? 'Main MT5',
+        apiKey: mt5Row?.api_key ?? '',
+        autoSyncEnabled: mt5Row?.sync_enabled ?? true,
+        broker: mt5Row?.broker ?? loadedAccounts[0]?.broker ?? '',
+        server: mt5Row?.server ?? '',
+        lastSyncAt: mt5Row?.last_sync_at ?? null,
+      })
 
       setForm((prev) => {
         const accountId = prev.accountId || loadedAccounts[0]?.id || ''
@@ -1069,6 +1144,65 @@ function App() {
     setMessage('Display name opgeslagen.')
   }
 
+  const saveMt5Settings = async () => {
+    if (!supabase || !session) return
+
+    const apiKey = mt5Sync.apiKey.trim()
+    if (!apiKey) {
+      setError('Genereer of vul eerst een MT5 API key in.')
+      return
+    }
+
+    setSavingMt5Sync(true)
+    setError('')
+    setMessage('')
+
+    const tradingAccountId = activeTradingAccount?.id ?? mt5Sync.tradingAccountId
+
+    const { data, error: upsertError } = await supabase
+      .from('mt5_connections')
+      .upsert(
+        {
+          user_id: session.user.id,
+          trading_account_id: tradingAccountId,
+          api_key: apiKey,
+          mt5_login: mt5Sync.accountLabel.trim() || null,
+          broker: mt5Sync.broker.trim() || null,
+          server: mt5Sync.server.trim() || null,
+          sync_enabled: mt5Sync.autoSyncEnabled,
+        },
+        { onConflict: 'user_id' },
+      )
+      .select('id, trading_account_id, api_key, mt5_login, broker, server, sync_enabled, last_sync_at')
+      .single()
+
+    if (upsertError || !data) {
+      setError(upsertError?.message ?? 'Kon MT5 instellingen niet opslaan.')
+      setSavingMt5Sync(false)
+      return
+    }
+
+    setMt5Sync({
+      id: data.id,
+      tradingAccountId: data.trading_account_id,
+      accountLabel: data.mt5_login ?? '',
+      apiKey: data.api_key,
+      autoSyncEnabled: data.sync_enabled,
+      broker: data.broker ?? '',
+      server: data.server ?? '',
+      lastSyncAt: data.last_sync_at,
+    })
+
+    setMessage('MT5 koppeling opgeslagen. Gebruik deze API key in je EA.')
+    setSavingMt5Sync(false)
+  }
+
+  const rotateMt5ApiKey = () => {
+    setMt5Sync((prev) => ({ ...prev, apiKey: generateMt5ApiKey() }))
+    setMessage('Nieuwe API key gegenereerd. Klik nog op "MT5 koppeling opslaan".')
+    setError('')
+  }
+
   const createTrade = async (e: FormEvent) => {
     e.preventDefault()
     if (!supabase) return
@@ -1303,7 +1437,10 @@ function App() {
           <button type="button" className="theme-toggle theme-toggle-auth" onClick={toggleTheme}>
             {theme === 'light' ? 'Dark modus' : 'Light modus'}
           </button>
-          <h1>MH Journal</h1>
+          <div className="auth-brand">
+            <img src="/mh-logo-icon.png" alt="MH Journal logo" className="auth-logo" />
+            <h1>MH Journal</h1>
+          </div>
           <p className="err">{supabaseConfigError}</p>
         </section>
       </main>
@@ -1325,7 +1462,10 @@ function App() {
           <button type="button" className="theme-toggle theme-toggle-auth" onClick={toggleTheme}>
             {theme === 'light' ? 'Dark modus' : 'Light modus'}
           </button>
-          <h1>MH Journal</h1>
+          <div className="auth-brand">
+            <img src="/mh-logo-icon.png" alt="MH Journal logo" className="auth-logo" />
+            <h1>MH Journal</h1>
+          </div>
           <p>Log in met e-mail en wachtwoord om je trading data veilig te beheren.</p>
           <div className="auth-mode-tabs">
             <button
@@ -1435,19 +1575,64 @@ function App() {
     <main className="dv-shell">
       <header className="dv-topbar">
         <div className="dv-brand">
-          <span className="dot blue" />
+          <img src="/mh-logo-icon.png" alt="MH Journal logo" className="dv-logo-icon" />
           <strong>MH Journal</strong>
           <span className="dot green" />
           <small>live</small>
         </div>
-        <div className="dv-topbar-right">
-          <button className="chip">{displayName}</button>
-          <button type="button" className="theme-toggle chip" onClick={toggleTheme}>
-            {theme === 'light' ? 'Dark modus' : 'Light modus'}
+        <div className="dv-topbar-right" ref={profileMenuRef}>
+          <button
+            type="button"
+            className={`chip profile-trigger ${profileMenuOpen ? 'active' : ''}`}
+            onClick={() => setProfileMenuOpen((prev) => !prev)}
+            aria-expanded={profileMenuOpen}
+            aria-haspopup="menu"
+          >
+            <span className="profile-avatar" aria-hidden>
+              {displayName.charAt(0).toUpperCase()}
+            </span>
+            <span>{displayName}</span>
+            <span className="profile-chevron" aria-hidden>
+              ▾
+            </span>
           </button>
-          <button className="chip" onClick={signOut}>
-            Uitloggen
-          </button>
+          {profileMenuOpen && (
+            <div className="profile-menu" role="menu" aria-label="Profiel menu">
+              <button
+                type="button"
+                className="profile-menu-item"
+                onClick={() => {
+                  setProfileDisplayName(
+                    (session.user.user_metadata?.display_name as string | undefined)?.trim() || displayName,
+                  )
+                  setSettingsOpen(true)
+                  setProfileMenuOpen(false)
+                }}
+              >
+                Profiel & MT5 koppeling
+              </button>
+              <button
+                type="button"
+                className="profile-menu-item"
+                onClick={() => {
+                  toggleTheme()
+                  setProfileMenuOpen(false)
+                }}
+              >
+                {theme === 'light' ? 'Dark modus' : 'Light modus'}
+              </button>
+              <button
+                type="button"
+                className="profile-menu-item danger"
+                onClick={() => {
+                  setProfileMenuOpen(false)
+                  void signOut()
+                }}
+              >
+                Uitloggen
+              </button>
+            </div>
+          )}
         </div>
       </header>
 
@@ -1461,14 +1646,7 @@ function App() {
             <button className="ghost-button" onClick={() => setManualTradeOpen(true)}>
               + Trade handmatig
             </button>
-            <button
-              onClick={() => {
-                setProfileDisplayName(
-                  (session.user.user_metadata?.display_name as string | undefined)?.trim() || 'Mattis',
-                )
-                setSettingsOpen(true)
-              }}
-            >
+            <button onClick={() => setManualTradeOpen(true)}>
               + Nieuw trade plan
             </button>
           </div>
@@ -2007,98 +2185,127 @@ function App() {
           <article className="modal-card settings-modal" onClick={(e) => e.stopPropagation()}>
             <h2>Instellingen</h2>
             <p>MT5 koppeling, kapitaal en accountability</p>
-            <h3>Profiel</h3>
-            <div className="two-col">
+            <section className="settings-section">
+              <h3>Profiel</h3>
+              <div className="two-col">
+                <input
+                  value={profileDisplayName}
+                  onChange={(e) => setProfileDisplayName(e.target.value)}
+                  placeholder="Display name"
+                />
+                <button type="button" className="ghost-button" onClick={() => void saveProfileDisplayName()}>
+                  Naam opslaan
+                </button>
+              </div>
+            </section>
+
+            <section className="settings-section">
+              <h3>MT5 Koppeling</h3>
+              <div className="two-col">
+                <input
+                  value={mt5Sync.apiKey}
+                  onChange={(e) => setMt5Sync((prev) => ({ ...prev, apiKey: e.target.value }))}
+                  placeholder="API key (in EA invoeren)"
+                />
+                <input
+                  value={mt5Sync.accountLabel}
+                  onChange={(e) => setMt5Sync((prev) => ({ ...prev, accountLabel: e.target.value }))}
+                  placeholder="MT5 Login"
+                />
+              </div>
+              <div className="modal-actions spread">
+                <button type="button" className="ghost-button" onClick={rotateMt5ApiKey}>
+                  Genereer nieuwe API key
+                </button>
+                <button type="button" onClick={() => void saveMt5Settings()} disabled={savingMt5Sync}>
+                  {savingMt5Sync ? 'Opslaan...' : 'MT5 koppeling opslaan'}
+                </button>
+              </div>
+              <div className="two-col">
+                <input
+                  value={mt5Sync.broker}
+                  onChange={(e) => setMt5Sync((prev) => ({ ...prev, broker: e.target.value }))}
+                  placeholder="Broker"
+                />
+                <input
+                  value={mt5Sync.server}
+                  onChange={(e) => setMt5Sync((prev) => ({ ...prev, server: e.target.value }))}
+                  placeholder="Server"
+                />
+              </div>
+              <div className="settings-callout">
+                <strong>Endpoint voor MT5 EA</strong>
+                <input value={mt5Endpoint} readOnly placeholder="MT5 endpoint" />
+                <p className="muted">
+                  WebRequest URL: <strong>{mt5Endpoint || 'VITE_SUPABASE_URL ontbreekt'}</strong>
+                  {mt5Sync.lastSyncAt
+                    ? ` · laatste sync ${new Date(mt5Sync.lastSyncAt).toLocaleString('nl-BE')}`
+                    : ' · nog geen sync ontvangen'}
+                </p>
+              </div>
+            </section>
+
+            <section className="settings-section">
+              <h3>Kapitaal & Rendement</h3>
+              <div className="two-col">
+                <input
+                  key={activeTradingAccount?.id ?? 'no-account'}
+                  defaultValue={
+                    activeTradingAccount?.starting_balance !== null &&
+                    activeTradingAccount?.starting_balance !== undefined
+                      ? String(activeTradingAccount.starting_balance)
+                      : ''
+                  }
+                  onBlur={(e) => {
+                    void updateActiveAccountStartingBalance(e.target.value)
+                  }}
+                  placeholder="Startkapitaal"
+                  disabled={!activeTradingAccount}
+                />
+                <select value={accountCurrency} onChange={(e) => setAccountCurrency(e.target.value)}>
+                  <option value="EUR">€ EUR</option>
+                  <option value="USD">$ USD</option>
+                </select>
+              </div>
+            </section>
+
+            <section className="settings-section">
+              <h3>Accountability</h3>
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={mt5Sync.autoSyncEnabled}
+                  onChange={(e) => setMt5Sync((prev) => ({ ...prev, autoSyncEnabled: e.target.checked }))}
+                />
+                MT5 auto-sync actief
+              </label>
+              <div className="two-col">
+                <input
+                  value={accountability.violationAmount}
+                  onChange={(e) =>
+                    setAccountability((prev) => ({ ...prev, violationAmount: e.target.value }))
+                  }
+                  placeholder="Bedrag per violation"
+                />
+                <input
+                  value={accountability.charityName}
+                  onChange={(e) =>
+                    setAccountability((prev) => ({ ...prev, charityName: e.target.value }))
+                  }
+                  placeholder="Goed doel"
+                />
+              </div>
               <input
-                value={profileDisplayName}
-                onChange={(e) => setProfileDisplayName(e.target.value)}
-                placeholder="Display name"
-              />
-              <button type="button" className="ghost-button" onClick={() => void saveProfileDisplayName()}>
-                Naam opslaan
-              </button>
-            </div>
-            <h3>MT5 Koppeling</h3>
-            <div className="two-col">
-              <input
-                value={mt5Sync.apiKey}
-                onChange={(e) => setMt5Sync((prev) => ({ ...prev, apiKey: e.target.value }))}
-                placeholder="API key (in EA invoeren)"
+                value={accountability.donationUrl}
+                onChange={(e) => setAccountability((prev) => ({ ...prev, donationUrl: e.target.value }))}
+                placeholder="Donatie link (optioneel)"
               />
               <input
-                value={mt5Sync.accountLabel}
-                onChange={(e) => setMt5Sync((prev) => ({ ...prev, accountLabel: e.target.value }))}
-                placeholder="MT5 Login"
+                value={accountability.partnerEmail}
+                onChange={(e) => setAccountability((prev) => ({ ...prev, partnerEmail: e.target.value }))}
+                placeholder="Partner email (optioneel)"
               />
-            </div>
-            <div className="two-col">
-              <input
-                value={mt5Sync.broker}
-                onChange={(e) => setMt5Sync((prev) => ({ ...prev, broker: e.target.value }))}
-                placeholder="Broker"
-              />
-              <input
-                value={mt5Sync.server}
-                onChange={(e) => setMt5Sync((prev) => ({ ...prev, server: e.target.value }))}
-                placeholder="Server"
-              />
-            </div>
-            <h3>Kapitaal & Rendement</h3>
-            <div className="two-col">
-              <input
-                key={activeTradingAccount?.id ?? 'no-account'}
-                defaultValue={
-                  activeTradingAccount?.starting_balance !== null &&
-                  activeTradingAccount?.starting_balance !== undefined
-                    ? String(activeTradingAccount.starting_balance)
-                    : ''
-                }
-                onBlur={(e) => {
-                  void updateActiveAccountStartingBalance(e.target.value)
-                }}
-                placeholder="Startkapitaal"
-                disabled={!activeTradingAccount}
-              />
-              <select value={accountCurrency} onChange={(e) => setAccountCurrency(e.target.value)}>
-                <option value="EUR">€ EUR</option>
-                <option value="USD">$ USD</option>
-              </select>
-            </div>
-            <h3>Accountability</h3>
-            <label className="checkbox-row">
-              <input
-                type="checkbox"
-                checked={mt5Sync.autoSyncEnabled}
-                onChange={(e) => setMt5Sync((prev) => ({ ...prev, autoSyncEnabled: e.target.checked }))}
-              />
-              Boete bij plan-violation
-            </label>
-            <div className="two-col">
-              <input
-                value={accountability.violationAmount}
-                onChange={(e) =>
-                  setAccountability((prev) => ({ ...prev, violationAmount: e.target.value }))
-                }
-                placeholder="Bedrag per violation"
-              />
-              <input
-                value={accountability.charityName}
-                onChange={(e) =>
-                  setAccountability((prev) => ({ ...prev, charityName: e.target.value }))
-                }
-                placeholder="Goed doel"
-              />
-            </div>
-            <input
-              value={accountability.donationUrl}
-              onChange={(e) => setAccountability((prev) => ({ ...prev, donationUrl: e.target.value }))}
-              placeholder="Donatie link (optioneel)"
-            />
-            <input
-              value={accountability.partnerEmail}
-              onChange={(e) => setAccountability((prev) => ({ ...prev, partnerEmail: e.target.value }))}
-              placeholder="Partner email (optioneel)"
-            />
+            </section>
             <div className="modal-actions">
               <button type="button" className="ghost-button" onClick={() => setSettingsOpen(false)}>
                 Sluiten

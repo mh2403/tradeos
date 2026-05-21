@@ -5,8 +5,9 @@ Persoonlijke forex trading journal met Supabase auth + database.
 ## Stack
 
 - React + Vite + TypeScript
-- Supabase Auth (magic link)
+- Supabase Auth (email + password + reset)
 - Supabase Postgres (RLS)
+- Supabase Edge Function (`mt5-trade`) voor MT5 ingest
 - GitHub Actions deploy naar GitHub Pages
 
 ## 1) Supabase setup
@@ -65,13 +66,61 @@ npm run dev
 - **Nooit** de `service_role` key in frontend of GitHub Pages gebruiken.
 - Bescherming gebeurt via Supabase RLS policies.
 
-## Volgende stap
+## MT5 ingest activeren
 
-Na deploy kan je meteen verder bouwen op de modules:
+1. Run alle migraties naar remote:
 
-- MT5 imports/sync
-- Trade blotter + position tracker
-- Setup/checklist journal
-- Performance dashboards
-- Accountability settings (boete, partner-mail, donatielink)
-- Coaching/edge reports
+```bash
+supabase db push
+```
+
+2. Deploy de edge function:
+
+```bash
+supabase functions deploy mt5-trade --no-verify-jwt --use-api
+```
+
+3. In de app (`Instellingen > MT5 koppeling`):
+- genereer API key
+- vul MT5 login / broker / server in
+- klik `MT5 koppeling opslaan`
+
+4. In MT5:
+- voeg in `Tools > Options > Expert Advisors` je WebRequest URL toe:
+  - `https://<PROJECT_REF>.supabase.co`
+- laat je EA POSTen naar:
+  - `https://<PROJECT_REF>.supabase.co/functions/v1/mt5-trade`
+- stuur API key via `x-api-key` header of in body als `apiKey`
+
+5. Voorbeeld payload:
+
+```json
+{
+  "apiKey": "mhj_xxx",
+  "account": {
+    "login": "9234567",
+    "broker": "IC Markets",
+    "server": "ICMarketsSC-Demo",
+    "currency": "EUR",
+    "starting_balance": 10000
+  },
+  "trades": [
+    {
+      "ticket": "5001",
+      "symbol": "XAUUSD",
+      "type": "buy",
+      "volume": 0.1,
+      "open_time": "2026-05-21T09:00:00Z",
+      "close_time": "2026-05-21T11:00:00Z",
+      "entry_price": 3325.1,
+      "exit_price": 3330.5,
+      "stop_loss": 3318.0,
+      "take_profit": 3338.0,
+      "profit": 54.0,
+      "commission": -2.1,
+      "swap": 0,
+      "comment": "London setup"
+    }
+  ]
+}
+```
