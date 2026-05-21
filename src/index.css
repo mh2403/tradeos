@@ -50,6 +50,10 @@
   box-sizing: border-box;
 }
 
+html {
+  font-size: 13.5px;
+}
+
 body {
   margin: 0;
   min-height: 100vh;
@@ -81,7 +85,7 @@ p {
 }
 
 .dv-topbar {
-  height: 72px;
+  height: 68px;
   border-bottom: 1px solid #e7e9ef;
   background: #fff;
   display: flex;
@@ -132,11 +136,11 @@ p {
 }
 
 .dv-main {
-  max-width: 1420px;
+  max-width: 1650px;
   margin: 0 auto;
-  padding: 2rem;
+  padding: 1.3rem 1.5rem;
   display: grid;
-  gap: 1rem;
+  gap: 0.85rem;
 }
 
 .dv-headline-row {
@@ -146,7 +150,7 @@ p {
 }
 
 .dv-headline-row h1 {
-  font-size: 3rem;
+  font-size: 2.7rem;
   line-height: 1;
   margin-bottom: 0.3rem;
 }
@@ -205,7 +209,7 @@ p {
 }
 
 .dv-kpi h3 {
-  font-size: 2.65rem;
+  font-size: 2.35rem;
   line-height: 1.1;
   margin: 0.35rem 0;
 }
@@ -262,7 +266,7 @@ p {
 }
 
 .bar-chart {
-  min-height: 220px;
+  min-height: 200px;
   display: flex;
   align-items: flex-end;
   gap: 1rem;
@@ -631,7 +635,7 @@ p {
   margin: 0;
   width: 100%;
   font-weight: 500;
-  min-height: 72px;
+  min-height: 64px;
   border-radius: 10px;
   padding: 0.38rem;
   background: var(--surface-alt);
@@ -1048,6 +1052,10 @@ button:disabled {
 }
 
 @media (max-width: 900px) {
+  html {
+    font-size: 16px;
+  }
+
   .dv-topbar {
     padding: 0 1rem;
   }

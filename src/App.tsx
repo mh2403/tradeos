@@ -337,6 +337,8 @@ function App() {
     return 'light'
   })
   const [email, setEmail] = useState('')
+  const [signupDisplayName, setSignupDisplayName] = useState('Mattis')
+  const [profileDisplayName, setProfileDisplayName] = useState('Mattis')
   const [password, setPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
   const [message, setMessage] = useState('')
@@ -925,6 +927,11 @@ function App() {
     e.preventDefault()
     if (!supabase) return
 
+    if (!signupDisplayName.trim()) {
+      setError('Display name is verplicht.')
+      return
+    }
+
     if (password.length < 6) {
       setError('Wachtwoord moet minstens 6 tekens bevatten.')
       return
@@ -943,7 +950,12 @@ function App() {
     const { data, error: authError } = await supabase.auth.signUp({
       email,
       password,
-      options: { emailRedirectTo: redirectTo },
+      options: {
+        emailRedirectTo: redirectTo,
+        data: {
+          display_name: signupDisplayName.trim(),
+        },
+      },
     })
 
     if (authError) {
@@ -1032,6 +1044,29 @@ function App() {
     setError('')
     const { error: signOutError } = await supabase.auth.signOut()
     if (signOutError) setError(signOutError.message)
+  }
+
+  const saveProfileDisplayName = async () => {
+    if (!supabase) return
+    const trimmed = profileDisplayName.trim()
+    if (!trimmed) {
+      setError('Display name is verplicht.')
+      return
+    }
+
+    setError('')
+    setMessage('')
+
+    const { error: updateError } = await supabase.auth.updateUser({
+      data: { display_name: trimmed },
+    })
+
+    if (updateError) {
+      setError(updateError.message)
+      return
+    }
+
+    setMessage('Display name opgeslagen.')
   }
 
   const createTrade = async (e: FormEvent) => {
@@ -1317,6 +1352,15 @@ function App() {
             </button>
           </div>
           <form onSubmit={authMode === 'login' ? signInWithPassword : signUpWithPassword} className="stack">
+            {authMode === 'signup' && (
+              <input
+                type="text"
+                value={signupDisplayName}
+                onChange={(e) => setSignupDisplayName(e.target.value)}
+                placeholder="Display name (bv. Mattis)"
+                required
+              />
+            )}
             <input
               type="email"
               value={email}
@@ -1382,7 +1426,11 @@ function App() {
   }
 
   const monthTitle = selectedMonth.toLocaleDateString('en-US', { month: 'long', year: 'numeric' })
-  const displayName = 'Mattis'
+  const displayName =
+    (session.user.user_metadata?.display_name as string | undefined)?.trim() ||
+    profileDisplayName.trim() ||
+    session.user.email?.split('@')[0] ||
+    'Mattis'
   return (
     <main className="dv-shell">
       <header className="dv-topbar">
@@ -1413,7 +1461,16 @@ function App() {
             <button className="ghost-button" onClick={() => setManualTradeOpen(true)}>
               + Trade handmatig
             </button>
-            <button onClick={() => setSettingsOpen(true)}>+ Nieuw trade plan</button>
+            <button
+              onClick={() => {
+                setProfileDisplayName(
+                  (session.user.user_metadata?.display_name as string | undefined)?.trim() || 'Mattis',
+                )
+                setSettingsOpen(true)
+              }}
+            >
+              + Nieuw trade plan
+            </button>
           </div>
         </div>
 
@@ -1950,6 +2007,17 @@ function App() {
           <article className="modal-card settings-modal" onClick={(e) => e.stopPropagation()}>
             <h2>Instellingen</h2>
             <p>MT5 koppeling, kapitaal en accountability</p>
+            <h3>Profiel</h3>
+            <div className="two-col">
+              <input
+                value={profileDisplayName}
+                onChange={(e) => setProfileDisplayName(e.target.value)}
+                placeholder="Display name"
+              />
+              <button type="button" className="ghost-button" onClick={() => void saveProfileDisplayName()}>
+                Naam opslaan
+              </button>
+            </div>
             <h3>MT5 Koppeling</h3>
             <div className="two-col">
               <input
